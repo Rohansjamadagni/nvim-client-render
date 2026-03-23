@@ -75,6 +75,10 @@ function M.create_shim(project_info, session, callback)
   vim.fn.mkdir(git_dir .. "/objects", "p")
 
   session.git_dir = git_dir
+
+  -- Update manifest with git_dir
+  M._write_manifest(project_info.local_path, session)
+
   M.sync_metadata(project_info.local_path, callback)
 end
 
@@ -152,9 +156,78 @@ function M.sync_metadata(local_path, callback)
   })
 end
 
+---Get manifest file path for a session
+---@param local_path string
+---@return string
+function M._get_manifest_path(local_path)
+  local control_dir = config.values.ssh.control_dir
+  return control_dir .. "/sessions/" .. vim.fn.sha256(local_path):sub(1, 16) .. ".json"
+end
+
+---Write session manifest to disk
+---@param local_path string
+---@param session GitSession
+function M._write_manifest(local_path, session)
+  local manifest_path = M._get_manifest_path(local_path)
+  vim.fn.mkdir(vim.fn.fnamemodify(manifest_path, ":h"), "p")
+
+  local manifest = {
+    local_path = local_path,
+    host = session.project_info.host,
+    remote_path = session.project_info.remote_path,
+    name = session.project_info.name,
+    git_dir = session.git_dir,
+    remote_git_dir = session.remote_git_dir,
+  }
+
+  local json = vim.json.encode(manifest)
+  vim.fn.writefile({ json }, manifest_path)
+end
+
+---Delete session manifest from disk
+---@param local_path string
+function M._delete_manifest(local_path)
+  local manifest_path = M._get_manifest_path(local_path)
+  if vim.fn.filereadable(manifest_path) == 1 then
+    vim.fn.delete(manifest_path)
+  end
+end
+
+---Load all session manifests from disk
+---@return table<string, table>  local_path -> session data
+function M._load_all_manifests()
+  local manifest_dir = config.values.ssh.control_dir .. "/sessions"
+  if vim.fn.isdirectory(manifest_dir) == 0 then
+    return {}
+  end
+
+  local sessions = {}
+  local manifest_files = vim.fn.glob(manifest_dir .. "/*.json", false, true)
+  if type(manifest_files) == "string" then
+    manifest_files = { manifest_files }
+  end
+
+  for _, manifest_file in ipairs(manifest_files) do
+    if vim.fn.filereadable(manifest_file) == 1 then
+      local content = vim.fn.readfile(manifest_file)
+      if #content > 0 then
+        local ok, manifest = pcall(vim.json.decode, content[1])
+        if ok and manifest.local_path then
+          sessions[manifest.local_path] = manifest
+        end
+      end
+    end
+  end
+
+  return sessions
+end
+
 ---Regenerate the single dispatcher wrapper script covering all sessions
 function M._regenerate_wrapper()
-  if vim.tbl_count(M._sessions) == 0 then
+  -- Load all sessions from manifests (both this instance and others)
+  local all_sessions = M._load_all_manifests()
+
+  if vim.tbl_count(all_sessions) == 0 then
     -- No sessions left: delete wrapper, restore PATH and fugitive
     if M._wrapper_path then
       local bin_dir = vim.fn.fnamemodify(M._wrapper_path, ":h")
@@ -327,15 +400,30 @@ function M._regenerate_wrapper()
   add("}")
   add("")
 
-  -- Per-session blocks
+  -- Per-session blocks (from all sessions, including other nvim instances)
   local session_idx = 0
-  for local_path, session in pairs(M._sessions) do
-    local info = session.project_info
+  for local_path, session_data in pairs(all_sessions) do
+    -- session_data is from manifest, may not have all fields
+    -- Try to get fresh info from M._sessions if available
+    local session = M._sessions[local_path] or {}
+    local info = session.project_info or {
+      host = session_data.host,
+      remote_path = session_data.remote_path,
+      local_path = session_data.local_path,
+      name = session_data.name,
+    }
+    local git_dir = session.git_dir or session_data.git_dir
+    local remote_git_dir = session.remote_git_dir or session_data.remote_git_dir
+
     local ssh_args, parsed = ssh.get_ssh_args(info.host)
     if ssh_args and parsed then
       local dest = get_ssh_dest(parsed)
-      local git_dir = session.git_dir or (info.local_path .. "/.git")
-      local remote_git_dir = session.remote_git_dir or (info.remote_path .. "/.git")
+      if not git_dir then
+        git_dir = info.local_path .. "/.git"
+      end
+      if not remote_git_dir then
+        remote_git_dir = info.remote_path .. "/.git"
+      end
 
       local socket = ""
       for i, a in ipairs(ssh_args) do
@@ -452,9 +540,13 @@ function M.setup(project_info, callback)
     }
     M._sessions[key] = session
 
+    -- Write manifest so other nvim instances know about this session
+    M._write_manifest(key, session)
+
     M.create_shim(project_info, session, function(shim_err)
       if shim_err then
         M._sessions[key] = nil
+        M._delete_manifest(key)
         callback(shim_err)
         return
       end
@@ -500,12 +592,14 @@ end
 function M.teardown(local_path)
   if local_path then
     M._sessions[local_path] = nil
-    if vim.tbl_count(M._sessions) > 0 then
-      M._regenerate_wrapper()
-    else
-      M._regenerate_wrapper() -- This will clean up wrapper and restore state
-    end
+    -- Delete manifest so other nvim instances don't include this session
+    M._delete_manifest(local_path)
+    M._regenerate_wrapper()
   else
+    -- Delete all manifests for this instance's sessions
+    for key in pairs(M._sessions) do
+      M._delete_manifest(key)
+    end
     M._sessions = {}
     M._regenerate_wrapper()
   end

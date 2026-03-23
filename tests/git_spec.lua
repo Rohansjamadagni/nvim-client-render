@@ -174,7 +174,7 @@ describe("git", function()
           { host = "myhost", user = "user" }
       end
 
-      git._sessions[tmpdir] = {
+      local session = {
         project_info = {
           host = "user@myhost",
           remote_path = "/home/user/project",
@@ -185,6 +185,10 @@ describe("git", function()
         remote_git_dir = "/home/user/project/.git",
         prev_head = nil,
       }
+
+      git._sessions[tmpdir] = session
+      -- Write manifest so _regenerate_wrapper can find it
+      git._write_manifest(tmpdir, session)
 
       git._regenerate_wrapper()
 
@@ -202,6 +206,8 @@ describe("git", function()
       assert.truthy(content:find("_rewrite_and_proxy"), "missing shared proxy function")
       assert.truthy(content:find("GIT_EDITOR"), "missing editor handling")
 
+      -- Clean up manifests
+      git._delete_manifest(tmpdir)
       vim.fn.delete(git._wrapper_path)
       vim.fn.delete(tmpdir, "rf")
     end)
@@ -214,7 +220,7 @@ describe("git", function()
         return { "-S", "/tmp/test_ssh_socket" }, { host = "example.com" }
       end
 
-      git._sessions[tmpdir] = {
+      local session = {
         project_info = {
           host = "example.com",
           remote_path = "/srv/myapp",
@@ -226,12 +232,18 @@ describe("git", function()
         prev_head = nil,
       }
 
+      git._sessions[tmpdir] = session
+      -- Write manifest so _regenerate_wrapper can find it
+      git._write_manifest(tmpdir, session)
+
       git._regenerate_wrapper()
       local content = table.concat(vim.fn.readfile(git._wrapper_path), "\n")
 
       assert.truthy(content:find("/srv/myapp"), "remote path not found in wrapper")
       assert.truthy(content:find("example.com"), "host not found in wrapper")
 
+      -- Clean up manifests
+      git._delete_manifest(tmpdir)
       vim.fn.delete(git._wrapper_path)
       vim.fn.delete(tmpdir, "rf")
     end)
