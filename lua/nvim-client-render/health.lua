@@ -11,16 +11,12 @@ function M.check()
   end
 
   -- Check binaries
-  local binaries = { "ssh", "rsync", "scp" }
+  local binaries = { "ssh", "rsync" }
   for _, bin in ipairs(binaries) do
     if vim.fn.executable(bin) == 1 then
       vim.health.ok(bin .. " found: " .. vim.fn.exepath(bin))
     else
-      if bin == "scp" then
-        vim.health.warn(bin .. " not found (optional, rsync preferred)")
-      else
-        vim.health.error(bin .. " not found")
-      end
+      vim.health.error(bin .. " not found")
     end
   end
 

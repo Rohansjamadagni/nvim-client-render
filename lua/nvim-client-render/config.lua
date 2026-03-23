@@ -8,7 +8,6 @@ M.defaults = {
     server_alive_interval = 15,
   },
   transfer = {
-    prefer = "rsync",
     rsync_flags = { "-az", "--inplace", "--partial" },
     exclude = { ".git", "node_modules", "__pycache__", ".venv", "target", "build" },
   },
@@ -48,10 +47,6 @@ M.defaults = {
 
 M.values = vim.deepcopy(M.defaults)
 
----Deep merge t2 into t1
----@param t1 table
----@param t2 table
----@return table
 ---@param t table
 ---@return boolean
 local function is_list(t)
@@ -61,6 +56,10 @@ local function is_list(t)
   return vim.tbl_islist(t)
 end
 
+---Deep merge t2 into t1
+---@param t1 table
+---@param t2 table
+---@return table
 local function deep_merge(t1, t2)
   local result = {}
   for k, v in pairs(t1) do

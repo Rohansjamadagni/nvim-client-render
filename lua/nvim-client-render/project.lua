@@ -15,10 +15,11 @@ local M = {}
 ---@type ProjectInfo|nil
 M._active = nil
 
----Compute the local mirror path for a host and remote path
+---Compute the local mirror path and project name for a host and remote path
 ---@param host string
 ---@param remote_path string
----@return string
+---@return string local_path
+---@return string name
 local function compute_local_path(host, remote_path)
   local base = config.values.project.base_dir
   local host_id = vim.fn.sha256(host):sub(1, 12)
@@ -26,7 +27,7 @@ local function compute_local_path(host, remote_path)
   if name == "" then
     name = "root"
   end
-  return base .. "/" .. host_id .. "/" .. name
+  return base .. "/" .. host_id .. "/" .. name, name
 end
 
 ---Open a remote project
@@ -45,7 +46,7 @@ function M.open(host, remote_path, callback)
       return
     end
 
-    local local_path = compute_local_path(host, remote_path)
+    local local_path, name = compute_local_path(host, remote_path)
     vim.fn.mkdir(local_path, "p")
 
     vim.notify("[nvim-client-render] Syncing " .. remote_path .. "...", vim.log.levels.INFO)
@@ -54,11 +55,6 @@ function M.open(host, remote_path, callback)
       if sync_err then
         callback("Folder sync failed: " .. sync_err)
         return
-      end
-
-      local name = vim.fn.fnamemodify(remote_path, ":t")
-      if name == "" then
-        name = "root"
       end
 
       M._active = {

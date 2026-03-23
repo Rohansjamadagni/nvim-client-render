@@ -141,7 +141,7 @@ function M.start(opts, bufnr)
     return
   end
 
-  local dest = parsed.user and (parsed.user .. "@" .. parsed.host) or parsed.host
+  local dest = ssh.ssh_dest(parsed)
 
   -- Build SSH command
   local remote_cmd = "cd " .. active.remote_path .. " && exec " .. opts.server_cmd

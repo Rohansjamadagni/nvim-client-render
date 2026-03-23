@@ -67,10 +67,14 @@ local function handle_event(remote_path, event_type)
     return
   end
 
-  -- Loop prevention: check suppressed
-  if M._suppressed[remote_path] then
+  -- Loop prevention: check suppressed (TTL-based)
+  local suppress_ts = M._suppressed[remote_path]
+  if suppress_ts then
+    local ttl = config.values.remote_watcher.suppress_ttl_ms
+    if vim.uv.now() - suppress_ts < ttl then
+      return
+    end
     M._suppressed[remote_path] = nil
-    return
   end
 
   local project = require("nvim-client-render.project")

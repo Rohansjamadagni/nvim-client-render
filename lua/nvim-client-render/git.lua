@@ -10,6 +10,7 @@ local M = {}
 ---@field remote_git_dir string
 ---@field prev_head string|nil
 ---@field prev_fugitive_executable string|nil
+---@field prev_path string|nil
 
 ---@type GitState|nil
 M._state = nil
@@ -24,15 +25,7 @@ end
 -- Expose for testing
 M._shell_quote = shell_quote
 
----Get SSH destination string from parsed host
----@param parsed SSHHost
----@return string
-local function get_ssh_dest(parsed)
-  if parsed.user then
-    return parsed.user .. "@" .. parsed.host
-  end
-  return parsed.host
-end
+local get_ssh_dest = ssh.ssh_dest
 
 ---Check if the remote project is a git repository
 ---Uses `git rev-parse` to handle standard repos, worktrees, bare repos, and .git files
@@ -176,7 +169,10 @@ function M.create_wrapper(project_info)
     rsync_ssh = rsync_ssh .. " " .. port_args
   end
 
-  local wrapper_path = control_dir .. "/nvim_git_wrapper.sh"
+  -- Place wrapper as "git" in a bin dir so uv.spawn("git") finds it
+  local bin_dir = control_dir .. "/bin"
+  vim.fn.mkdir(bin_dir, "p")
+  local wrapper_path = bin_dir .. "/git"
 
   -- Build wrapper script line-by-line
   local lines = {}
@@ -194,7 +190,7 @@ function M.create_wrapper(project_info)
   add("REMOTE_GIT_DIR=" .. shell_quote(remote_git_dir))
   add("SSH_SOCKET=" .. shell_quote(socket))
   add("SSH_DEST=" .. shell_quote(dest))
-  add("SSH_PORT_ARGS='" .. port_args .. "'")
+  add("SSH_PORT_ARGS=" .. shell_quote(port_args))
   add("REAL_GIT=" .. shell_quote(real_git))
   add("RSYNC_SSH=" .. shell_quote(rsync_ssh))
   add("")
@@ -302,7 +298,12 @@ function M.create_wrapper(project_info)
   -- 1. Deploy a small script to remote that signals when git needs an editor
   -- 2. Run git in background
   -- 3. Poll for signal, download file, run local editor, upload, signal done
-  add('if [ -n "$GIT_EDITOR" ] || [ -n "$GIT_SEQUENCE_EDITOR" ]; then')
+  -- Skip editor coordination when GIT_EDITOR is "true" — fugitive sets this
+  -- to suppress editors on read-only commands (log, diff, etc.)
+  add('_need_editor=false')
+  add('case "${GIT_EDITOR:-}" in ""|true|/usr/bin/true|/bin/true) ;; *) _need_editor=true ;; esac')
+  add('case "${GIT_SEQUENCE_EDITOR:-}" in ""|true|/usr/bin/true|/bin/true) ;; *) _need_editor=true ;; esac')
+  add('if [ "$_need_editor" = "true" ]; then')
   add('  orig_editor="${GIT_EDITOR:-$GIT_SEQUENCE_EDITOR}"')
   add('  coord_id="nvim_$$_$(date +%s)"')
   add('  signal_file="/tmp/.${coord_id}_signal"')
@@ -428,6 +429,11 @@ function M.setup(project_info, callback)
 
         M._state.wrapper_path = result
 
+        -- Prepend wrapper's bin dir to PATH so uv.spawn("git") finds it
+        local bin_dir = vim.fn.fnamemodify(result, ":h")
+        M._state.prev_path = vim.env.PATH
+        vim.env.PATH = bin_dir .. ":" .. vim.env.PATH
+
         if git_cfg.fugitive then
           M.configure_fugitive(result)
         end
@@ -444,6 +450,11 @@ function M.teardown()
   local state = M._state
   if not state then return end
 
+  -- Restore PATH
+  if state.prev_path then
+    vim.env.PATH = state.prev_path
+  end
+
   -- Restore previous fugitive executable
   if state.prev_fugitive_executable ~= nil then
     vim.g.fugitive_git_executable = state.prev_fugitive_executable
@@ -451,9 +462,13 @@ function M.teardown()
     pcall(vim.api.nvim_del_var, "fugitive_git_executable")
   end
 
-  -- Clean up wrapper script
-  if state.wrapper_path and vim.fn.filereadable(state.wrapper_path) == 1 then
-    vim.fn.delete(state.wrapper_path)
+  -- Clean up wrapper script and bin dir
+  if state.wrapper_path then
+    local bin_dir = vim.fn.fnamemodify(state.wrapper_path, ":h")
+    if vim.fn.filereadable(state.wrapper_path) == 1 then
+      vim.fn.delete(state.wrapper_path)
+    end
+    pcall(vim.fn.delete, bin_dir, "d")
   end
 
   M._state = nil

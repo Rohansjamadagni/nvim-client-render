@@ -45,7 +45,7 @@ function M.open(opts)
     return
   end
 
-  local dest = parsed.user and (parsed.user .. "@" .. parsed.host) or parsed.host
+  local dest = ssh.ssh_dest(parsed)
 
   local cmd = { "ssh" }
   vim.list_extend(cmd, ssh_args)

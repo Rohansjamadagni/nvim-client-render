@@ -3,9 +3,6 @@ local ssh = require("nvim-client-render.ssh")
 
 local M = {}
 
--- Cache for rsync availability per host
-M._rsync_cache = {}
-
 ---Build the rsync -e flag from SSH args
 ---@param ssh_args string[]
 ---@return string
@@ -182,21 +179,6 @@ function M.download_file(host, remote_file, local_file, callback)
       end)
     end,
   })
-end
-
----Check if rsync is available on the remote host (cached)
----@param host string
----@param callback fun(available: boolean)
-function M.check_rsync(host, callback)
-  if M._rsync_cache[host] ~= nil then
-    vim.schedule(function() callback(M._rsync_cache[host]) end)
-    return
-  end
-
-  ssh.exec(host, "which rsync", function(code)
-    M._rsync_cache[host] = (code == 0)
-    callback(code == 0)
-  end)
 end
 
 ---Dry run to detect remote changes

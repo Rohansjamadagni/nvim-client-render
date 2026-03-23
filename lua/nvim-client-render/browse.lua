@@ -9,12 +9,8 @@ local M = {}
 function M.browse(host, base_path)
   base_path = base_path or "~"
 
-  if not ssh.is_connected(host) then
-    vim.notify("[nvim-client-render] Not connected to " .. host .. ". Run :RemoteOpen first.", vim.log.levels.ERROR)
-    return
-  end
-
-  ssh.exec(host, "find " .. vim.fn.shellescape(base_path) .. " -maxdepth 2 -type d 2>/dev/null", function(code, stdout)
+  local function do_browse()
+    ssh.exec(host, "find " .. vim.fn.shellescape(base_path) .. " -maxdepth 2 -type d 2>/dev/null", function(code, stdout)
     if code ~= 0 or #stdout == 0 then
       vim.notify("[nvim-client-render] Could not list directories on " .. host, vim.log.levels.ERROR)
       return
@@ -32,6 +28,20 @@ function M.browse(host, base_path)
       end
     end)
   end)
+  end
+
+  if not ssh.is_connected(host) then
+    vim.notify("[nvim-client-render] Connecting to " .. host .. "...", vim.log.levels.INFO)
+    ssh.connect(host, function(err)
+      if err then
+        vim.notify("[nvim-client-render] Connection failed: " .. err, vim.log.levels.ERROR)
+        return
+      end
+      do_browse()
+    end)
+  else
+    do_browse()
+  end
 end
 
 return M

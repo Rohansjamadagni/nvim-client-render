@@ -145,6 +145,42 @@ function M.setup()
     desc = "Retry failed sync uploads",
   })
 
+  vim.api.nvim_create_user_command("RemoteBrowse", function(opts)
+    local browse = require("nvim-client-render.browse")
+    local args = opts.fargs
+    if #args < 1 then
+      vim.notify("[nvim-client-render] Usage: :RemoteBrowse <host> [base_path]", vim.log.levels.ERROR)
+      return
+    end
+    browse.browse(args[1], args[2])
+  end, {
+    nargs = "+",
+    desc = "Browse remote directories and open a project",
+    complete = function(arg_lead, cmd_line, cursor_pos)
+      local parts = vim.split(cmd_line:sub(1, cursor_pos), "%s+")
+      local nargs = #parts - 1
+      if nargs <= 1 then
+        local hosts = {}
+        local config_file = vim.fn.expand("~/.ssh/config")
+        if vim.fn.filereadable(config_file) == 1 then
+          local lines = vim.fn.readfile(config_file)
+          for _, line in ipairs(lines) do
+            local h = line:match("^%s*Host%s+(.+)$")
+            if h and not h:match("[*?]") then
+              for host in h:gmatch("%S+") do
+                if host:find(arg_lead, 1, true) == 1 then
+                  table.insert(hosts, host)
+                end
+              end
+            end
+          end
+        end
+        return hosts
+      end
+      return {}
+    end,
+  })
+
   -- Remote Terminal commands
   vim.api.nvim_create_user_command("RemoteTerminal", function(opts)
     local terminal = require("nvim-client-render.terminal")

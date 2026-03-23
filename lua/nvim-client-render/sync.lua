@@ -229,13 +229,13 @@ end
 ---Get current sync status
 ---@return { pending: number, uploading: number, failed: number, items: SyncItem[] }
 function M.get_status()
-  local counts = { pending = 0, uploading = 0, failed = 0, retry_pending = 0 }
+  local counts = { pending = 0, in_progress = 0, failed = 0, retry_pending = 0 }
   for _, item in ipairs(M._queue) do
-    counts[item.state] = (counts[item.state] or 0) + 1
+    counts[item.state] = counts[item.state] + 1
   end
   return {
     pending = counts.pending + counts.retry_pending,
-    uploading = counts.in_progress or 0,
+    uploading = counts.in_progress,
     failed = counts.failed,
     items = M._queue,
   }

@@ -86,7 +86,7 @@ end
 ---Get the SSH destination string (user@host or host)
 ---@param parsed SSHHost
 ---@return string
-local function ssh_dest(parsed)
+function M.ssh_dest(parsed)
   if parsed.user then
     return parsed.user .. "@" .. parsed.host
   end
@@ -116,7 +116,7 @@ function M.connect(host_string, callback)
   vim.list_extend(args, { "-fNM" })
   vim.list_extend(args, base_ssh_args(parsed, sock))
   vim.list_extend(args, { "-o", "ControlPersist=" .. cfg.control_persist })
-  table.insert(args, ssh_dest(parsed))
+  table.insert(args, M.ssh_dest(parsed))
 
   local stderr_chunks = {}
 
@@ -158,7 +158,7 @@ function M.disconnect(host_string, callback)
     return
   end
 
-  vim.fn.jobstart({ "ssh", "-O", "exit", "-S", conn.socket, ssh_dest(parsed) }, {
+  vim.fn.jobstart({ "ssh", "-O", "exit", "-S", conn.socket, M.ssh_dest(parsed) }, {
     on_exit = function()
       vim.schedule(function()
         M._connections[hid] = nil
@@ -180,7 +180,7 @@ function M.disconnect_all(callback)
   local remaining = #keys
   for _, hid in ipairs(keys) do
     local conn = M._connections[hid]
-    vim.fn.jobstart({ "ssh", "-O", "exit", "-S", conn.socket, ssh_dest(conn.parsed) }, {
+    vim.fn.jobstart({ "ssh", "-O", "exit", "-S", conn.socket, M.ssh_dest(conn.parsed) }, {
       on_exit = function()
         vim.schedule(function()
           M._connections[hid] = nil
@@ -212,7 +212,7 @@ function M.exec(host_string, cmd, callback)
 
   local args = { "ssh" }
   vim.list_extend(args, base_ssh_args(parsed, conn.socket))
-  table.insert(args, ssh_dest(parsed))
+  table.insert(args, M.ssh_dest(parsed))
   table.insert(args, "--")
   table.insert(args, cmd)
 
@@ -262,7 +262,7 @@ function M.exec_streaming(host_string, cmd, on_line, on_exit)
 
   local args = { "ssh" }
   vim.list_extend(args, base_ssh_args(parsed, conn.socket))
-  table.insert(args, ssh_dest(parsed))
+  table.insert(args, M.ssh_dest(parsed))
   table.insert(args, "--")
   table.insert(args, cmd)
 
@@ -325,7 +325,7 @@ function M.is_connected(host_string)
     return false
   end
   -- Synchronous check via system()
-  local result = vim.fn.system({ "ssh", "-O", "check", "-S", conn.socket, ssh_dest(parsed) })
+  local result = vim.fn.system({ "ssh", "-O", "check", "-S", conn.socket, M.ssh_dest(parsed) })
   return vim.v.shell_error == 0
 end
 
