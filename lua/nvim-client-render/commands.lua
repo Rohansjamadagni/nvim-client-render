@@ -1,3 +1,4 @@
+local config = require("nvim-client-render.config")
 local project = require("nvim-client-render.project")
 local ssh = require("nvim-client-render.ssh")
 local sync = require("nvim-client-render.sync")
@@ -324,6 +325,42 @@ function M.setup()
   end, {
     nargs = "*",
     desc = "Run a git command on the remote",
+  })
+
+  vim.api.nvim_create_user_command("RemoteClearCache", function()
+    vim.ui.select({ "Yes", "No" }, {
+      prompt = "Delete all local cache (" .. config.values.cache_dir .. ")?"
+    }, function(choice)
+      if choice ~= "Yes" then return end
+
+      local sessions = project.get_all()
+      local remaining = vim.tbl_count(sessions)
+
+      local function delete_cache()
+        ssh.disconnect_all(function()
+          vim.fn.delete(config.values.cache_dir, "rf")
+          vim.notify("[nvim-client-render] Cache cleared: " .. config.values.cache_dir, vim.log.levels.INFO)
+        end)
+      end
+
+      if remaining == 0 then
+        delete_cache()
+        return
+      end
+
+      sync.flush(function()
+        for local_path, _ in pairs(sessions) do
+          project.close(local_path, function()
+            remaining = remaining - 1
+            if remaining == 0 then
+              delete_cache()
+            end
+          end)
+        end
+      end)
+    end)
+  end, {
+    desc = "Clear all local cache (mirrored files, SSH sockets, git shims)",
   })
 
   vim.api.nvim_create_user_command("RemoteSession", function(opts)

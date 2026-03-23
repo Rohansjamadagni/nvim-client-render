@@ -1,8 +1,8 @@
 local M = {}
 
 M.defaults = {
+  cache_dir = vim.fn.stdpath("state") .. "/nvim-client-render",
   ssh = {
-    control_dir = vim.fn.stdpath("state") .. "/nvim-client-render/ssh",
     control_persist = "10m",
     connect_timeout = 10,
     server_alive_interval = 15,
@@ -17,7 +17,6 @@ M.defaults = {
     max_retries = 10,
   },
   project = {
-    base_dir = vim.fn.stdpath("state") .. "/nvim-client-render/files",
     auto_cd = true,
   },
   remote_watcher = {
@@ -45,7 +44,20 @@ M.defaults = {
   },
 }
 
+---Resolve cache-derived paths (only sets them if not already present).
+---@param values table
+local function resolve_cache_paths(values)
+  local cache = values.cache_dir
+  if not values.ssh.control_dir then
+    values.ssh.control_dir = cache .. "/ssh"
+  end
+  if not values.project.base_dir then
+    values.project.base_dir = cache .. "/files"
+  end
+end
+
 M.values = vim.deepcopy(M.defaults)
+resolve_cache_paths(M.values)
 
 ---@param t table
 ---@return boolean
@@ -81,6 +93,7 @@ end
 
 function M.setup(opts)
   M.values = deep_merge(M.defaults, opts or {})
+  resolve_cache_paths(M.values)
 end
 
 return M
