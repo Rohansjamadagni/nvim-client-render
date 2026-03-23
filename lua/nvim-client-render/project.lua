@@ -12,6 +12,9 @@ local M = {}
 ---@field local_path string
 ---@field name string
 
+---@type table<string, ProjectInfo>
+M._sessions = {}
+
 ---@type ProjectInfo|nil
 M._active = nil
 
@@ -57,26 +60,31 @@ function M.open(host, remote_path, callback)
         return
       end
 
-      M._active = {
+      local norm_local_path = vim.fn.fnamemodify(local_path, ":p"):gsub("/$", "")
+
+      local project_info = {
         host = host,
         remote_path = remote_path,
-        local_path = vim.fn.fnamemodify(local_path, ":p"):gsub("/$", ""),
+        local_path = norm_local_path,
         name = name,
       }
 
+      M._sessions[norm_local_path] = project_info
+      M._active = project_info
+
       -- Set up file watchers
-      watcher.setup(M._active)
+      watcher.setup(project_info)
 
       -- Start remote watcher for 2-way sync
       local remote_watcher = require("nvim-client-render.remote_watcher")
-      local watcher_ok, watcher_err = pcall(remote_watcher.start, M._active)
+      local watcher_ok, watcher_err = pcall(remote_watcher.start, project_info)
       if not watcher_ok then
         vim.notify("[nvim-client-render] Remote watcher: " .. tostring(watcher_err), vim.log.levels.WARN)
       end
 
       -- Auto-detect and setup git integration (non-blocking, non-fatal)
       local git = require("nvim-client-render.git")
-      git.setup(M._active, function(git_err)
+      git.setup(project_info, function(git_err)
         if git_err then
           vim.notify("[nvim-client-render] Git: " .. git_err, vim.log.levels.DEBUG)
         end
@@ -84,11 +92,11 @@ function M.open(host, remote_path, callback)
 
       -- Auto cd into local mirror
       if config.values.project.auto_cd then
-        vim.cmd("cd " .. vim.fn.fnameescape(M._active.local_path))
+        vim.cmd("cd " .. vim.fn.fnameescape(project_info.local_path))
       end
 
       vim.notify(
-        "[nvim-client-render] Project ready: " .. M._active.name .. " (" .. M._active.local_path .. ")",
+        "[nvim-client-render] Project ready: " .. project_info.name .. " (" .. project_info.local_path .. ")",
         vim.log.levels.INFO
       )
 
@@ -97,53 +105,93 @@ function M.open(host, remote_path, callback)
   end)
 end
 
----Close the active project
+---Close a specific session or the active one
+---@param local_path string|nil  session key to close, or nil for active
 ---@param callback fun(err: string|nil)|nil
-function M.close(callback)
+function M.close(local_path, callback)
+  -- Support old signature: close(callback)
+  if type(local_path) == "function" then
+    callback = local_path
+    local_path = nil
+  end
   callback = callback or function() end
 
-  if not M._active then
+  local session = nil
+  if local_path then
+    session = M._sessions[local_path]
+  else
+    session = M._active
+  end
+
+  if not session then
     callback(nil)
     return
   end
 
-  local host = M._active.host
+  local session_key = session.local_path
 
   -- Flush sync queue first
   sync.flush(function()
-    -- Teardown git integration
-    pcall(function() require("nvim-client-render.git").teardown() end)
+    -- Teardown git integration for this session
+    pcall(function() require("nvim-client-render.git").teardown(session_key) end)
 
-    -- Stop remote watcher, terminals, and LSP before tearing down
+    -- Stop remote watcher for this session
     local remote_watcher = require("nvim-client-render.remote_watcher")
-    remote_watcher.stop()
+    remote_watcher.stop(session_key)
 
-    local terminal = require("nvim-client-render.terminal")
-    terminal.close_all()
+    -- Stop terminals and LSP (these remain global for now)
+    if vim.tbl_count(M._sessions) <= 1 then
+      local terminal = require("nvim-client-render.terminal")
+      terminal.close_all()
 
-    local lsp_mod = require("nvim-client-render.lsp")
-    lsp_mod.stop_all()
+      local lsp_mod = require("nvim-client-render.lsp")
+      lsp_mod.stop_all()
+    end
 
-    watcher.teardown()
-    M._active = nil
+    watcher.teardown(session_key)
+    M._sessions[session_key] = nil
+
+    -- Update _active
+    if M._active and M._active.local_path == session_key then
+      -- Pick another session or nil
+      M._active = nil
+      for _, s in pairs(M._sessions) do
+        M._active = s
+        break
+      end
+    end
+
     callback(nil)
   end)
+end
+
+---Find the session whose local_path prefixes the given path
+---@param path string
+---@return ProjectInfo|nil
+function M.get_for_path(path)
+  local norm = vim.fn.fnamemodify(path, ":p"):gsub("/$", "")
+  for base, session in pairs(M._sessions) do
+    local norm_base = vim.fn.fnamemodify(base, ":p"):gsub("/$", "")
+    if norm:sub(1, #norm_base) == norm_base and (#norm == #norm_base or norm:sub(#norm_base + 1, #norm_base + 1) == "/") then
+      return session
+    end
+  end
+  return nil
 end
 
 ---Map a local path to its corresponding remote path
 ---@param local_path string
 ---@return string|nil
 function M.local_to_remote(local_path)
-  if not M._active then
-    return nil
-  end
-
   local norm_local = vim.fn.fnamemodify(local_path, ":p"):gsub("/$", "")
-  local norm_base = vim.fn.fnamemodify(M._active.local_path, ":p"):gsub("/$", "")
 
-  if norm_local:sub(1, #norm_base) == norm_base then
-    local relative = norm_local:sub(#norm_base + 1)
-    return M._active.remote_path .. relative
+  -- Try to find matching session
+  for _, session in pairs(M._sessions) do
+    local norm_base = vim.fn.fnamemodify(session.local_path, ":p"):gsub("/$", "")
+    if norm_local:sub(1, #norm_base) == norm_base then
+      local relative = norm_local:sub(#norm_base + 1)
+      return session.remote_path .. relative
+    end
   end
 
   return nil
@@ -153,36 +201,33 @@ end
 ---@param remote_path string
 ---@return string|nil
 function M.remote_to_local(remote_path)
-  if not M._active then
-    return nil
-  end
-
-  if remote_path:sub(1, #M._active.remote_path) == M._active.remote_path then
-    local relative = remote_path:sub(#M._active.remote_path + 1)
-    return M._active.local_path .. relative
+  for _, session in pairs(M._sessions) do
+    if remote_path:sub(1, #session.remote_path) == session.remote_path then
+      local relative = remote_path:sub(#session.remote_path + 1)
+      return session.local_path .. relative
+    end
   end
 
   return nil
 end
 
----Check if a file path is within the active project
+---Check if a file path is within any active project
 ---@param filepath string
 ---@return boolean
 function M.is_project_file(filepath)
-  if not M._active then
-    return false
-  end
-
-  local norm = vim.fn.fnamemodify(filepath, ":p"):gsub("/$", "")
-  local norm_base = vim.fn.fnamemodify(M._active.local_path, ":p"):gsub("/$", "")
-
-  return norm:sub(1, #norm_base) == norm_base
+  return M.get_for_path(filepath) ~= nil
 end
 
 ---Get the active project info
 ---@return ProjectInfo|nil
 function M.get_active()
   return M._active
+end
+
+---Get all active sessions
+---@return table<string, ProjectInfo>
+function M.get_all()
+  return M._sessions
 end
 
 ---Refresh: re-sync from remote

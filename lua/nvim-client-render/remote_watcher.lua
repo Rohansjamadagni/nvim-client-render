@@ -4,19 +4,33 @@ local transfer = require("nvim-client-render.transfer")
 
 local M = {}
 
-M._job_id = nil
-M._suppressed = {} ---@type table<string, number> remote_path -> timestamp
-M._download_timers = {} ---@type table<string, userdata> remote_path -> uv_timer
-M._reconnect_attempts = 0
-M._project_info = nil ---@type table|nil
-M._event_count = 0
-M._event_window_start = 0
-M._gc_timer = nil
+---@class WatcherState
+---@field job_id number|nil
+---@field project_info ProjectInfo
+---@field suppressed table<string, number>
+---@field download_timers table<string, userdata>
+---@field reconnect_attempts number
+---@field event_count number
+---@field event_window_start number
+---@field gc_timer userdata|nil
+
+---@type table<string, WatcherState>
+M._watchers = {}
 
 ---Suppress a remote path from triggering a download (loop prevention)
 ---@param remote_path string
 function M.suppress(remote_path)
-  M._suppressed[remote_path] = vim.uv.now()
+  local project = require("nvim-client-render.project")
+  for _, w in pairs(M._watchers) do
+    if remote_path:sub(1, #w.project_info.remote_path) == w.project_info.remote_path then
+      w.suppressed[remote_path] = vim.uv.now()
+      return
+    end
+  end
+  -- Fallback: suppress in all watchers
+  for _, w in pairs(M._watchers) do
+    w.suppressed[remote_path] = vim.uv.now()
+  end
 end
 
 ---Build exclude regex from config exclude list (for inotifywait --exclude)
@@ -25,7 +39,6 @@ end
 local function build_exclude_regex(excludes)
   local parts = {}
   for _, pat in ipairs(excludes) do
-    -- Escape dots for regex; parenthesize gsub to discard count return value
     local escaped = pat:gsub("%.", "\\.")
     table.insert(parts, escaped)
   end
@@ -59,22 +72,19 @@ local function build_watch_cmd(remote_path, excludes)
   )
 end
 
----Handle a parsed event
+---Handle a parsed event for a specific watcher
+---@param w WatcherState
 ---@param remote_path string
----@param event_type string "MODIFY"|"CREATE"|"DELETE"|"MOVED_TO"|"MOVED_FROM"|"unknown"
-local function handle_event(remote_path, event_type)
-  if not M._project_info then
-    return
-  end
-
+---@param event_type string
+local function handle_event(w, remote_path, event_type)
   -- Loop prevention: check suppressed (TTL-based)
-  local suppress_ts = M._suppressed[remote_path]
+  local suppress_ts = w.suppressed[remote_path]
   if suppress_ts then
     local ttl = config.values.remote_watcher.suppress_ttl_ms
     if vim.uv.now() - suppress_ts < ttl then
       return
     end
-    M._suppressed[remote_path] = nil
+    w.suppressed[remote_path] = nil
   end
 
   local project = require("nvim-client-render.project")
@@ -85,23 +95,21 @@ local function handle_event(remote_path, event_type)
 
   -- Event storm detection
   local now = vim.uv.now()
-  if now - M._event_window_start > 2000 then
-    M._event_count = 0
-    M._event_window_start = now
+  if now - w.event_window_start > 2000 then
+    w.event_count = 0
+    w.event_window_start = now
   end
-  M._event_count = M._event_count + 1
+  w.event_count = w.event_count + 1
 
-  if M._event_count > 50 then
-    -- Cancel all individual download timers
-    for path, timer in pairs(M._download_timers) do
+  if w.event_count > 50 then
+    for path, timer in pairs(w.download_timers) do
       timer:stop()
       timer:close()
-      M._download_timers[path] = nil
+      w.download_timers[path] = nil
     end
-    M._event_count = 0
-    -- Trigger full sync instead
+    w.event_count = 0
     vim.notify("[nvim-client-render] Event storm detected, running full sync...", vim.log.levels.INFO)
-    transfer.sync_folder(M._project_info.host, M._project_info.remote_path, M._project_info.local_path, function(err)
+    transfer.sync_folder(w.project_info.host, w.project_info.remote_path, w.project_info.local_path, function(err)
       if err then
         vim.notify("[nvim-client-render] Full sync failed: " .. err, vim.log.levels.ERROR)
       else
@@ -112,24 +120,23 @@ local function handle_event(remote_path, event_type)
   end
 
   -- Debounce per remote_path
-  if M._download_timers[remote_path] then
-    M._download_timers[remote_path]:stop()
-    M._download_timers[remote_path]:close()
-    M._download_timers[remote_path] = nil
+  if w.download_timers[remote_path] then
+    w.download_timers[remote_path]:stop()
+    w.download_timers[remote_path]:close()
+    w.download_timers[remote_path] = nil
   end
 
   local debounce_ms = config.values.remote_watcher.debounce_ms
   local timer = vim.uv.new_timer()
-  M._download_timers[remote_path] = timer
+  w.download_timers[remote_path] = timer
 
   timer:start(debounce_ms, 0, function()
     timer:close()
-    M._download_timers[remote_path] = nil
+    w.download_timers[remote_path] = nil
 
     vim.schedule(function()
       if event_type == "DELETE" or event_type == "MOVED_FROM" then
         vim.fn.delete(local_path)
-        -- Wipe buffer if open
         for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
           if vim.api.nvim_buf_is_valid(bufnr) then
             local buf_name = vim.api.nvim_buf_get_name(bufnr)
@@ -143,7 +150,6 @@ local function handle_event(remote_path, event_type)
       end
 
       -- For MODIFY, CREATE, MOVED_TO: download the file
-      -- Conflict check for modified buffers
       local strategy = config.values.remote_watcher.conflict_strategy
       for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
         if vim.api.nvim_buf_is_valid(bufnr) then
@@ -158,23 +164,20 @@ local function handle_event(remote_path, event_type)
             elseif strategy == "local_wins" then
               return
             end
-            -- "remote_wins" falls through to download
           end
         end
       end
 
-      -- Ensure parent directory exists for new files
       local parent = vim.fn.fnamemodify(local_path, ":h")
       vim.fn.mkdir(parent, "p")
 
-      transfer.download_file(M._project_info.host, remote_path, local_path, function(err)
+      transfer.download_file(w.project_info.host, remote_path, local_path, function(err)
         if err then
           vim.notify("[nvim-client-render] Download failed: " .. err, vim.log.levels.ERROR)
           return
         end
         vim.cmd("checktime")
 
-        -- Notify LSP about the change
         local ok, lsp_mod = pcall(require, "nvim-client-render.lsp")
         if ok and lsp_mod.notify_file_changed then
           lsp_mod.notify_file_changed(remote_path)
@@ -184,98 +187,114 @@ local function handle_event(remote_path, event_type)
   end)
 end
 
----Parse an event line from inotifywait or fswatch
----@param line string
-function M._on_line(line)
-  if line == "" then
-    return
-  end
-
-  -- Try inotifywait format: "EVENT /path/to/file"
-  local event, path = line:match("^(%S+)%s+(.+)$")
-  if event and path then
-    -- Normalize event type (inotifywait can emit comma-separated events like "CREATE,ISDIR")
-    local event_type = "MODIFY"
-    if event:find("DELETE") then
-      event_type = "DELETE"
-    elseif event:find("CREATE") or event:find("MOVED_TO") then
-      event_type = "CREATE"
-    elseif event:find("MOVED_FROM") then
-      event_type = "MOVED_FROM"
+---Create on_line handler for a specific watcher
+---@param w WatcherState
+---@return fun(line: string)
+local function make_on_line(w)
+  return function(line)
+    if line == "" then
+      return
     end
-    handle_event(path, event_type)
-  else
-    -- fswatch format: just the path
-    handle_event(line, "MODIFY")
+
+    local event, path = line:match("^(%S+)%s+(.+)$")
+    if event and path then
+      local event_type = "MODIFY"
+      if event:find("DELETE") then
+        event_type = "DELETE"
+      elseif event:find("CREATE") or event:find("MOVED_TO") then
+        event_type = "CREATE"
+      elseif event:find("MOVED_FROM") then
+        event_type = "MOVED_FROM"
+      end
+      handle_event(w, path, event_type)
+    else
+      handle_event(w, line, "MODIFY")
+    end
   end
 end
 
----Handle watcher process exit with auto-reconnect
----@param code number
----@param stderr string[]
-function M._on_exit(code, stderr)
-  M._job_id = nil
+---Create on_exit handler for a specific watcher
+---@param w WatcherState
+---@param key string
+---@return fun(code: number, stderr: string[])
+local function make_on_exit(w, key)
+  return function(code, stderr)
+    w.job_id = nil
 
-  -- Normal shutdown (we stopped it)
-  if not M._project_info then
-    return
-  end
+    -- Normal shutdown (we stopped it)
+    if not M._watchers[key] then
+      return
+    end
 
-  local max_attempts = 5
-  if M._reconnect_attempts >= max_attempts then
+    local max_attempts = 5
+    if w.reconnect_attempts >= max_attempts then
+      vim.notify(
+        "[nvim-client-render] Remote watcher failed after " .. max_attempts .. " reconnect attempts",
+        vim.log.levels.ERROR
+      )
+      return
+    end
+
+    w.reconnect_attempts = w.reconnect_attempts + 1
+    local delay = math.min(2000 * (2 ^ (w.reconnect_attempts - 1)), 30000)
+
     vim.notify(
-      "[nvim-client-render] Remote watcher failed after " .. max_attempts .. " reconnect attempts",
-      vim.log.levels.ERROR
+      "[nvim-client-render] Remote watcher disconnected, reconnecting in " .. (delay / 1000) .. "s... (attempt " .. w.reconnect_attempts .. "/" .. max_attempts .. ")",
+      vim.log.levels.WARN
     )
-    return
-  end
 
-  M._reconnect_attempts = M._reconnect_attempts + 1
-  local delay = math.min(2000 * (2 ^ (M._reconnect_attempts - 1)), 30000)
-
-  vim.notify(
-    "[nvim-client-render] Remote watcher disconnected, reconnecting in " .. (delay / 1000) .. "s... (attempt " .. M._reconnect_attempts .. "/" .. max_attempts .. ")",
-    vim.log.levels.WARN
-  )
-
-  local timer = vim.uv.new_timer()
-  timer:start(delay, 0, function()
-    timer:close()
-    vim.schedule(function()
-      if M._project_info then
-        M.start(M._project_info)
-      end
+    local reconnect_timer = vim.uv.new_timer()
+    reconnect_timer:start(delay, 0, function()
+      reconnect_timer:close()
+      vim.schedule(function()
+        if M._watchers[key] then
+          M.start(w.project_info)
+        end
+      end)
     end)
-  end)
+  end
 end
 
 ---Start watching remote filesystem for changes
----@param project_info { host: string, remote_path: string, local_path: string, name: string }
+---@param project_info ProjectInfo
 function M.start(project_info)
   if not config.values.remote_watcher.enabled then
     return
   end
 
-  M.stop()
+  local key = project_info.local_path
 
-  M._project_info = project_info
-  M._reconnect_attempts = 0
+  -- Stop existing watcher for this session if any
+  if M._watchers[key] then
+    M.stop(key)
+  end
+
+  local w = {
+    job_id = nil,
+    project_info = project_info,
+    suppressed = {},
+    download_timers = {},
+    reconnect_attempts = 0,
+    event_count = 0,
+    event_window_start = 0,
+    gc_timer = nil,
+  }
+  M._watchers[key] = w
 
   local excludes = config.values.transfer.exclude or {}
   local cmd = build_watch_cmd(project_info.remote_path, excludes)
 
-  M._job_id = ssh.exec_streaming(project_info.host, cmd, M._on_line, M._on_exit)
+  w.job_id = ssh.exec_streaming(project_info.host, cmd, make_on_line(w), make_on_exit(w, key))
 
-  if M._job_id then
-    -- Start GC timer for stale suppressed entries
-    M._gc_timer = vim.uv.new_timer()
+  if w.job_id then
     local ttl = config.values.remote_watcher.suppress_ttl_ms
-    M._gc_timer:start(ttl, ttl, function()
+    w.gc_timer = vim.uv.new_timer()
+    w.gc_timer:start(ttl, ttl, function()
       vim.schedule(function()
         local now = vim.uv.now()
-        for path, ts in pairs(M._suppressed) do
+        for path, ts in pairs(w.suppressed) do
           if now - ts > ttl then
-            M._suppressed[path] = nil
+            w.suppressed[path] = nil
           end
         end
       end)
@@ -283,35 +302,61 @@ function M.start(project_info)
   end
 end
 
----Stop watching remote filesystem
-function M.stop()
-  M._project_info = nil
+---Stop a specific watcher or all watchers
+---@param local_path string|nil  session key, or nil to stop all
+function M.stop(local_path)
+  if local_path then
+    local w = M._watchers[local_path]
+    if w then
+      M._stop_watcher(w)
+      M._watchers[local_path] = nil
+    end
+  else
+    for key, w in pairs(M._watchers) do
+      M._stop_watcher(w)
+    end
+    M._watchers = {}
+  end
+end
 
-  if M._job_id then
-    pcall(vim.fn.jobstop, M._job_id)
-    M._job_id = nil
+---Internal: stop a single watcher state
+---@param w WatcherState
+function M._stop_watcher(w)
+  if w.job_id then
+    pcall(vim.fn.jobstop, w.job_id)
+    w.job_id = nil
   end
 
-  if M._gc_timer then
-    M._gc_timer:stop()
-    M._gc_timer:close()
-    M._gc_timer = nil
+  if w.gc_timer then
+    w.gc_timer:stop()
+    w.gc_timer:close()
+    w.gc_timer = nil
   end
 
-  for path, timer in pairs(M._download_timers) do
+  for _, timer in pairs(w.download_timers) do
     timer:stop()
     timer:close()
   end
-  M._download_timers = {}
-  M._suppressed = {}
-  M._event_count = 0
-  M._reconnect_attempts = 0
+  w.download_timers = {}
+  w.suppressed = {}
+  w.event_count = 0
+  w.reconnect_attempts = 0
 end
 
----Check if the remote watcher is currently running
+---Check if a watcher is running
+---@param local_path string|nil  session key, or nil to check if any are running
 ---@return boolean
-function M.is_running()
-  return M._job_id ~= nil
+function M.is_running(local_path)
+  if local_path then
+    local w = M._watchers[local_path]
+    return w ~= nil and w.job_id ~= nil
+  end
+  for _, w in pairs(M._watchers) do
+    if w.job_id ~= nil then
+      return true
+    end
+  end
+  return false
 end
 
 return M

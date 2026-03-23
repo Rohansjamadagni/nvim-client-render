@@ -30,13 +30,16 @@ function M.setup(opts)
       local sync = require("nvim-client-render.sync")
       local ssh = require("nvim-client-render.ssh")
 
-      -- Teardown git integration
+      -- Teardown all git sessions
       pcall(function() require("nvim-client-render.git").teardown() end)
 
-      -- Stop remote watcher, terminals, and LSP
+      -- Stop all remote watchers, terminals, and LSP
       pcall(function() require("nvim-client-render.remote_watcher").stop() end)
       pcall(function() require("nvim-client-render.terminal").close_all() end)
       pcall(function() require("nvim-client-render.lsp").stop_all() end)
+
+      -- Teardown all file watchers
+      pcall(function() require("nvim-client-render.watcher").teardown() end)
 
       -- Flush with a timeout so we don't hang forever
       local flushed = false

@@ -8,7 +8,10 @@ describe("git", function()
 
   before_each(function()
     config.setup()
-    git._state = nil
+    git._sessions = {}
+    git._original_path = nil
+    git._original_fugitive = nil
+    git._wrapper_path = nil
     original_exec = ssh.exec
     original_get_ssh_args = ssh.get_ssh_args
   end)
@@ -118,26 +121,32 @@ describe("git", function()
       local tmpdir = vim.fn.tempname()
       vim.fn.mkdir(tmpdir, "p")
 
-      git._state = {
-        project_info = {
-          host = "myhost",
-          remote_path = "/project",
-          local_path = tmpdir,
-          name = "project",
-        },
+      local project_info = {
+        host = "myhost",
+        remote_path = "/project",
+        local_path = tmpdir,
+        name = "project",
       }
+
+      local session = {
+        project_info = project_info,
+        remote_git_dir = "/project/.git",
+        git_dir = nil,
+        prev_head = nil,
+      }
+      git._sessions[tmpdir] = session
 
       -- Mock sync_metadata to succeed without SSH
       local orig_sync = git.sync_metadata
-      git.sync_metadata = function(cb)
-        local git_dir = git._state.git_dir
+      git.sync_metadata = function(local_path, cb)
+        local git_dir = session.git_dir
         vim.fn.writefile({ "ref: refs/heads/main" }, git_dir .. "/HEAD")
         vim.schedule(function() cb(nil) end)
       end
 
       local done = false
       local err
-      git.create_shim(git._state.project_info, function(e)
+      git.create_shim(project_info, session, function(e)
         err = e
         done = true
       end)
@@ -155,8 +164,8 @@ describe("git", function()
     end)
   end)
 
-  describe("create_wrapper", function()
-    it("generates wrapper script", function()
+  describe("_regenerate_wrapper", function()
+    it("generates wrapper script with session blocks", function()
       local tmpdir = vim.fn.tempname()
       vim.fn.mkdir(tmpdir, "p")
 
@@ -165,7 +174,7 @@ describe("git", function()
           { host = "myhost", user = "user" }
       end
 
-      git._state = {
+      git._sessions[tmpdir] = {
         project_info = {
           host = "user@myhost",
           remote_path = "/home/user/project",
@@ -173,14 +182,16 @@ describe("git", function()
           name = "project",
         },
         git_dir = tmpdir .. "/.git",
+        remote_git_dir = "/home/user/project/.git",
+        prev_head = nil,
       }
 
-      local wrapper_path = git.create_wrapper(git._state.project_info)
+      git._regenerate_wrapper()
 
-      assert.are.equal(1, vim.fn.filereadable(wrapper_path))
+      assert.is_not_nil(git._wrapper_path)
+      assert.are.equal(1, vim.fn.filereadable(git._wrapper_path))
 
-      local content = table.concat(vim.fn.readfile(wrapper_path), "\n")
-      -- Verify key parts of the wrapper
+      local content = table.concat(vim.fn.readfile(git._wrapper_path), "\n")
       assert.truthy(content:find("#!/bin/sh"), "missing shebang")
       assert.truthy(content:find("LOCAL_ROOT="), "missing LOCAL_ROOT")
       assert.truthy(content:find("REMOTE_ROOT="), "missing REMOTE_ROOT")
@@ -188,10 +199,10 @@ describe("git", function()
       assert.truthy(content:find('exec "$REAL_GIT"'), "missing fallback to real git")
       assert.truthy(content:find("REMOTE_GIT_DIR="), "missing REMOTE_GIT_DIR")
       assert.truthy(content:find("sq()"), "missing sq function")
-      assert.truthy(content:find("rewritten="), "missing arg rewriting")
+      assert.truthy(content:find("_rewrite_and_proxy"), "missing shared proxy function")
       assert.truthy(content:find("GIT_EDITOR"), "missing editor handling")
 
-      vim.fn.delete(wrapper_path)
+      vim.fn.delete(git._wrapper_path)
       vim.fn.delete(tmpdir, "rf")
     end)
 
@@ -203,7 +214,7 @@ describe("git", function()
         return { "-S", "/tmp/test_ssh_socket" }, { host = "example.com" }
       end
 
-      git._state = {
+      git._sessions[tmpdir] = {
         project_info = {
           host = "example.com",
           remote_path = "/srv/myapp",
@@ -211,22 +222,24 @@ describe("git", function()
           name = "myapp",
         },
         git_dir = tmpdir .. "/.git",
+        remote_git_dir = "/srv/myapp/.git",
+        prev_head = nil,
       }
 
-      local wrapper_path = git.create_wrapper(git._state.project_info)
-      local content = table.concat(vim.fn.readfile(wrapper_path), "\n")
+      git._regenerate_wrapper()
+      local content = table.concat(vim.fn.readfile(git._wrapper_path), "\n")
 
       assert.truthy(content:find("/srv/myapp"), "remote path not found in wrapper")
       assert.truthy(content:find("example.com"), "host not found in wrapper")
 
-      vim.fn.delete(wrapper_path)
+      vim.fn.delete(git._wrapper_path)
       vim.fn.delete(tmpdir, "rf")
     end)
   end)
 
   describe("configure_fugitive", function()
     it("sets g:fugitive_git_executable", function()
-      git._state = {
+      git._sessions["/tmp/test"] = {
         project_info = {
           host = "myhost",
           remote_path = "/project",
@@ -234,6 +247,8 @@ describe("git", function()
           name = "project",
         },
         git_dir = "/tmp/test/.git",
+        remote_git_dir = "/project/.git",
+        prev_head = nil,
       }
 
       git.configure_fugitive("/path/to/wrapper.sh")
@@ -242,74 +257,62 @@ describe("git", function()
       -- Clean up
       pcall(vim.api.nvim_del_var, "fugitive_git_executable")
     end)
-
-    it("saves previous fugitive_git_executable", function()
-      vim.g.fugitive_git_executable = "original_git"
-
-      git._state = {
-        project_info = {
-          host = "myhost",
-          remote_path = "/project",
-          local_path = "/tmp/test",
-          name = "project",
-        },
-        git_dir = "/tmp/test/.git",
-      }
-
-      git.configure_fugitive("/path/to/wrapper.sh")
-      assert.are.equal("original_git", git._state.prev_fugitive_executable)
-
-      -- Clean up
-      pcall(vim.api.nvim_del_var, "fugitive_git_executable")
-    end)
   end)
 
   describe("teardown", function()
-    it("restores previous fugitive_git_executable", function()
-      vim.g.fugitive_git_executable = "test_wrapper"
-
-      git._state = {
-        project_info = { host = "h", remote_path = "/p", local_path = "/l", name = "n" },
-        wrapper_path = "/nonexistent/wrapper.sh",
+    it("removes all sessions and cleans up", function()
+      git._sessions["/tmp/test"] = {
+        project_info = { host = "h", remote_path = "/p", local_path = "/tmp/test", name = "n" },
         git_dir = "/tmp/test/.git",
-        prev_fugitive_executable = "original_git",
+        remote_git_dir = "/p/.git",
+        prev_head = nil,
       }
+      git._original_fugitive = false
 
       git.teardown()
 
-      assert.are.equal("original_git", vim.g.fugitive_git_executable)
-      assert.is_nil(git._state)
+      assert.are.same({}, git._sessions)
 
       -- Clean up
       pcall(vim.api.nvim_del_var, "fugitive_git_executable")
     end)
 
-    it("removes fugitive_git_executable when no previous value", function()
-      vim.g.fugitive_git_executable = "test_wrapper"
-
-      git._state = {
-        project_info = { host = "h", remote_path = "/p", local_path = "/l", name = "n" },
-        wrapper_path = "/nonexistent/wrapper.sh",
-        git_dir = "/tmp/test/.git",
+    it("removes specific session", function()
+      git._sessions["/tmp/a"] = {
+        project_info = { host = "h", remote_path = "/a", local_path = "/tmp/a", name = "a" },
+        git_dir = "/tmp/a/.git",
+        remote_git_dir = "/a/.git",
+        prev_head = nil,
+      }
+      git._sessions["/tmp/b"] = {
+        project_info = { host = "h", remote_path = "/b", local_path = "/tmp/b", name = "b" },
+        git_dir = "/tmp/b/.git",
+        remote_git_dir = "/b/.git",
+        prev_head = nil,
       }
 
-      git.teardown()
-      -- Variable should be removed
-      local ok, val = pcall(vim.api.nvim_get_var, "fugitive_git_executable")
-      assert.is_false(ok)
-      assert.is_nil(git._state)
+      ssh.get_ssh_args = function()
+        return { "-S", "/tmp/test_ssh_socket" }, { host = "h" }
+      end
+
+      git.teardown("/tmp/a")
+
+      assert.is_nil(git._sessions["/tmp/a"])
+      assert.is_not_nil(git._sessions["/tmp/b"])
+
+      -- Clean up
+      pcall(vim.api.nvim_del_var, "fugitive_git_executable")
     end)
 
     it("is safe to call multiple times", function()
-      git._state = nil
       assert.has_no.errors(function() git.teardown() end)
       assert.has_no.errors(function() git.teardown() end)
     end)
   end)
 
   describe("on_fugitive_changed", function()
-    it("is safe when no state", function()
-      git._state = nil
+    it("is safe when no sessions", function()
+      git._sessions = {}
       assert.has_no.errors(function() git.on_fugitive_changed() end)
     end)
   end)
@@ -321,7 +324,7 @@ describe("git", function()
         vim.schedule(function() cb(0, { "On branch main" }, {}) end)
       end
 
-      git._state = {
+      git._sessions["/tmp/test"] = {
         project_info = {
           host = "myhost",
           remote_path = "/project",
@@ -329,6 +332,8 @@ describe("git", function()
           name = "project",
         },
         git_dir = "/tmp/test/.git",
+        remote_git_dir = "/project/.git",
+        prev_head = nil,
       }
 
       local done = false
@@ -338,7 +343,7 @@ describe("git", function()
         result_code = code
         result_stdout = stdout
         done = true
-      end)
+      end, "/tmp/test")
 
       vim.wait(1000, function() return done end)
       assert.are.equal(0, result_code)
@@ -346,7 +351,7 @@ describe("git", function()
     end)
 
     it("returns error when not initialized", function()
-      git._state = nil
+      git._sessions = {}
 
       local done = false
       local result_code

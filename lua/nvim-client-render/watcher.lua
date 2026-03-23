@@ -1,34 +1,43 @@
 local M = {}
 
-local _augroup = nil
+---@type table<string, number> local_path -> augroup id
+M._augroups = {}
 
----Set up file watchers for an active project
+---Set up file watchers for a project session
 ---@param project_info { host: string, remote_path: string, local_path: string, name: string }
 function M.setup(project_info)
   local sync = require("nvim-client-render.sync")
   local project = require("nvim-client-render.project")
 
-  M.teardown()
+  local key = project_info.local_path
+  -- Teardown existing augroup for this session if any
+  if M._augroups[key] then
+    pcall(vim.api.nvim_del_augroup_by_id, M._augroups[key])
+  end
 
-  _augroup = vim.api.nvim_create_augroup("NvimClientRender_Watcher", { clear = true })
+  local hash = vim.fn.sha256(key):sub(1, 12)
+  local augroup = vim.api.nvim_create_augroup("NvimClientRender_Watcher_" .. hash, { clear = true })
+  M._augroups[key] = augroup
 
   -- Normalize the local path for pattern matching
   local pattern = vim.fn.fnamemodify(project_info.local_path, ":p") .. "*"
 
   vim.api.nvim_create_autocmd("BufWritePost", {
     pattern = pattern,
-    group = _augroup,
+    group = augroup,
     callback = function(args)
       local remote = project.local_to_remote(args.file)
       if remote then
-        sync.enqueue(args.buf, args.file, remote, project_info.host)
+        local session = project.get_for_path(args.file)
+        local host = session and session.host or project_info.host
+        sync.enqueue(args.buf, args.file, remote, host)
       end
     end,
   })
 
   vim.api.nvim_create_autocmd("BufReadPost", {
     pattern = pattern,
-    group = _augroup,
+    group = augroup,
     callback = function(args)
       if vim.api.nvim_buf_is_valid(args.buf) then
         vim.b[args.buf].remote_sync_state = "synced"
@@ -40,7 +49,7 @@ function M.setup(project_info)
   -- capture their config, detach them, and start/attach a remote equivalent
   vim.api.nvim_create_autocmd("LspAttach", {
     pattern = pattern,
-    group = _augroup,
+    group = augroup,
     callback = function(args)
       local client = vim.lsp.get_client_by_id(args.data.client_id)
       if not client or client.name:match("^remote%-") then
@@ -76,11 +85,20 @@ function M.setup(project_info)
   })
 end
 
----Remove all watchers
-function M.teardown()
-  if _augroup then
-    vim.api.nvim_del_augroup_by_id(_augroup)
-    _augroup = nil
+---Remove watchers for a specific session or all sessions
+---@param local_path string|nil  session key, or nil to teardown all
+function M.teardown(local_path)
+  if local_path then
+    local augroup = M._augroups[local_path]
+    if augroup then
+      pcall(vim.api.nvim_del_augroup_by_id, augroup)
+      M._augroups[local_path] = nil
+    end
+  else
+    for key, augroup in pairs(M._augroups) do
+      pcall(vim.api.nvim_del_augroup_by_id, augroup)
+      M._augroups[key] = nil
+    end
   end
 end
 

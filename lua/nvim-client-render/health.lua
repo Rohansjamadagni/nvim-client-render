@@ -63,8 +63,9 @@ function M.check()
 
     -- Check git integration status
     local git = require("nvim-client-render.git")
-    if git._state then
-      local head_file = git._state.git_dir .. "/HEAD"
+    local git_session = git.get_session(active.local_path)
+    if git_session then
+      local head_file = git_session.git_dir .. "/HEAD"
       if vim.fn.filereadable(head_file) == 1 then
         local head = vim.fn.readfile(head_file)
         local branch = head[1] or "unknown"
@@ -75,8 +76,8 @@ function M.check()
       else
         vim.health.ok("Git integration: active")
       end
-      if git._state.wrapper_path then
-        vim.health.ok("Git wrapper: " .. git._state.wrapper_path)
+      if git._wrapper_path then
+        vim.health.ok("Git wrapper: " .. git._wrapper_path)
       end
 
       -- Check remote git availability

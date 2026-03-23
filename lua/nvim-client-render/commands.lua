@@ -4,6 +4,16 @@ local sync = require("nvim-client-render.sync")
 
 local M = {}
 
+---Get the session matching the current context (buffer path, then CWD, then active)
+---@return ProjectInfo|nil
+local function get_session_for_context()
+  local session = project.get_for_path(vim.api.nvim_buf_get_name(0))
+  if not session then
+    session = project.get_for_path(vim.fn.getcwd())
+  end
+  return session or project.get_active()
+end
+
 function M.setup()
   vim.api.nvim_create_user_command("RemoteOpen", function(opts)
     local args = opts.fargs
@@ -24,12 +34,10 @@ function M.setup()
     nargs = "+",
     desc = "Open a remote project for local editing",
     complete = function(arg_lead, cmd_line, cursor_pos)
-      -- Parse what arg we're on
       local parts = vim.split(cmd_line:sub(1, cursor_pos), "%s+")
-      local nargs = #parts - 1 -- subtract command name
+      local nargs = #parts - 1
 
       if nargs <= 1 then
-        -- Complete host from SSH config
         local hosts = {}
         local config_file = vim.fn.expand("~/.ssh/config")
         if vim.fn.filereadable(config_file) == 1 then
@@ -53,7 +61,7 @@ function M.setup()
   })
 
   vim.api.nvim_create_user_command("RemoteStatus", function()
-    local active = project.get_active()
+    local active = get_session_for_context()
     if not active then
       vim.notify("[nvim-client-render] No active project", vim.log.levels.INFO)
       return
@@ -82,12 +90,10 @@ function M.setup()
       end
     end
 
-    -- Remote watcher status
     local remote_watcher = require("nvim-client-render.remote_watcher")
     table.insert(lines, "")
-    table.insert(lines, "Remote Watcher: " .. (remote_watcher.is_running() and "running" or "stopped"))
+    table.insert(lines, "Remote Watcher: " .. (remote_watcher.is_running(active.local_path) and "running" or "stopped"))
 
-    -- LSP status
     local lsp_mod = require("nvim-client-render.lsp")
     local lsp_clients = lsp_mod.get_status()
     if #lsp_clients > 0 then
@@ -114,24 +120,38 @@ function M.setup()
   })
 
   vim.api.nvim_create_user_command("RemoteDisconnect", function()
-    local active = project.get_active()
+    local active = get_session_for_context()
     if not active then
       vim.notify("[nvim-client-render] No active project", vim.log.levels.INFO)
       return
     end
 
     local host = active.host
+    local session_key = active.local_path
 
     vim.notify("[nvim-client-render] Flushing sync queue...", vim.log.levels.INFO)
     sync.flush(function()
-      project.close(function()
-        ssh.disconnect(host, function(err)
-          if err then
-            vim.notify("[nvim-client-render] Disconnect error: " .. err, vim.log.levels.WARN)
-          else
-            vim.notify("[nvim-client-render] Disconnected from " .. host, vim.log.levels.INFO)
+      project.close(session_key, function()
+        -- Only disconnect SSH if no other sessions use this host
+        local still_used = false
+        for _, s in pairs(project.get_all()) do
+          if s.host == host then
+            still_used = true
+            break
           end
-        end)
+        end
+
+        if still_used then
+          vim.notify("[nvim-client-render] Session closed (SSH kept for other sessions on " .. host .. ")", vim.log.levels.INFO)
+        else
+          ssh.disconnect(host, function(err)
+            if err then
+              vim.notify("[nvim-client-render] Disconnect error: " .. err, vim.log.levels.WARN)
+            else
+              vim.notify("[nvim-client-render] Disconnected from " .. host, vim.log.levels.INFO)
+            end
+          end)
+        end
       end)
     end)
   end, {
@@ -205,17 +225,18 @@ function M.setup()
   -- Remote Watcher commands
   vim.api.nvim_create_user_command("RemoteWatch", function()
     local remote_watcher = require("nvim-client-render.remote_watcher")
-    if remote_watcher.is_running() then
-      remote_watcher.stop()
+    local active = get_session_for_context()
+    if not active then
+      vim.notify("[nvim-client-render] No active project", vim.log.levels.ERROR)
+      return
+    end
+
+    if remote_watcher.is_running(active.local_path) then
+      remote_watcher.stop(active.local_path)
       vim.notify("[nvim-client-render] Remote watcher stopped", vim.log.levels.INFO)
     else
-      local active = project.get_active()
-      if active then
-        remote_watcher.start(active)
-        vim.notify("[nvim-client-render] Remote watcher started", vim.log.levels.INFO)
-      else
-        vim.notify("[nvim-client-render] No active project", vim.log.levels.ERROR)
-      end
+      remote_watcher.start(active)
+      vim.notify("[nvim-client-render] Remote watcher started", vim.log.levels.INFO)
     end
   end, {
     desc = "Toggle remote filesystem watcher",
@@ -278,7 +299,8 @@ function M.setup()
   -- Remote Git commands
   vim.api.nvim_create_user_command("RemoteGit", function(opts)
     local git = require("nvim-client-render.git")
-    if not git._state then
+    local active = get_session_for_context()
+    if not active or not git.get_session(active.local_path) then
       vim.notify("[nvim-client-render] Git integration not active", vim.log.levels.ERROR)
       return
     end
@@ -305,7 +327,7 @@ function M.setup()
           vim.notify("[nvim-client-render] git " .. args .. " (exit " .. code .. ")", vim.log.levels.INFO)
         end
       end)
-    end)
+    end, active.local_path)
   end, {
     nargs = "*",
     desc = "Run a git command on the remote",
@@ -313,12 +335,13 @@ function M.setup()
 
   vim.api.nvim_create_user_command("RemoteGitSync", function()
     local git = require("nvim-client-render.git")
-    if not git._state then
+    local active = get_session_for_context()
+    if not active or not git.get_session(active.local_path) then
       vim.notify("[nvim-client-render] Git integration not active", vim.log.levels.ERROR)
       return
     end
 
-    git.sync_metadata(function(err)
+    git.sync_metadata(active.local_path, function(err)
       vim.schedule(function()
         if err then
           vim.notify("[nvim-client-render] Git sync failed: " .. err, vim.log.levels.ERROR)
@@ -337,6 +360,57 @@ function M.setup()
     vim.notify("[nvim-client-render] Restarting remote LSP clients...", vim.log.levels.INFO)
   end, {
     desc = "Restart all remote LSP clients",
+  })
+
+  -- New: List all active sessions
+  vim.api.nvim_create_user_command("RemoteList", function()
+    local sessions = project.get_all()
+    local active = project.get_active()
+
+    if vim.tbl_count(sessions) == 0 then
+      vim.notify("[nvim-client-render] No active sessions", vim.log.levels.INFO)
+      return
+    end
+
+    local lines = { "Active sessions:" }
+    for local_path, info in pairs(sessions) do
+      local marker = (active and active.local_path == local_path) and " *" or ""
+      table.insert(lines, string.format("  %s @ %s:%s%s", info.name, info.host, info.remote_path, marker))
+    end
+    table.insert(lines, "")
+    table.insert(lines, "(* = current active session)")
+
+    vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
+  end, {
+    desc = "List all active remote sessions",
+  })
+
+  -- New: Switch active session
+  vim.api.nvim_create_user_command("RemoteSwitch", function()
+    local sessions = project.get_all()
+
+    if vim.tbl_count(sessions) == 0 then
+      vim.notify("[nvim-client-render] No active sessions", vim.log.levels.INFO)
+      return
+    end
+
+    local items = {}
+    local keys = {}
+    for local_path, info in pairs(sessions) do
+      table.insert(items, info.name .. " @ " .. info.host .. ":" .. info.remote_path)
+      table.insert(keys, local_path)
+    end
+
+    vim.ui.select(items, { prompt = "Switch to session:" }, function(choice, idx)
+      if not choice or not idx then return end
+      local selected = sessions[keys[idx]]
+      if selected then
+        project._active = selected
+        vim.notify("[nvim-client-render] Switched to: " .. selected.name, vim.log.levels.INFO)
+      end
+    end)
+  end, {
+    desc = "Switch active remote session",
   })
 end
 
