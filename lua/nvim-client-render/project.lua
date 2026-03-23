@@ -230,6 +230,16 @@ function M.get_all()
   return M._sessions
 end
 
+---Get the session matching the current context (buffer path, then CWD, then active)
+---@return ProjectInfo|nil
+function M.get_for_context()
+  local session = M.get_for_path(vim.api.nvim_buf_get_name(0))
+  if not session then
+    session = M.get_for_path(vim.fn.getcwd())
+  end
+  return session or M._active
+end
+
 ---Refresh: re-sync from remote
 ---@param callback fun(err: string|nil)|nil
 function M.refresh(callback)

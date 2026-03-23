@@ -608,11 +608,7 @@ end
 ---Handle FugitiveChanged autocmd — determine session from buffer, sync that session
 function M.on_fugitive_changed()
   local project = require("nvim-client-render.project")
-  local buf_path = vim.api.nvim_buf_get_name(0)
-  local session_info = project.get_for_path(buf_path)
-  if not session_info then
-    session_info = project.get_for_path(vim.fn.getcwd())
-  end
+  local session_info = project.get_for_context()
 
   local session_key = session_info and session_info.local_path or nil
   local session = session_key and M._sessions[session_key] or nil
@@ -658,11 +654,8 @@ function M.exec(args, callback, local_path)
   if local_path then
     session = M._sessions[local_path]
   else
-    -- Try to find session from current buffer or CWD
     local project = require("nvim-client-render.project")
-    local info = project.get_for_path(vim.api.nvim_buf_get_name(0))
-      or project.get_for_path(vim.fn.getcwd())
-      or project.get_active()
+    local info = project.get_for_context()
     if info then
       session = M._sessions[info.local_path]
     end
