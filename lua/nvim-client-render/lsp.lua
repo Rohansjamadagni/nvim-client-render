@@ -63,6 +63,24 @@ local function deep_rewrite_uris(obj, transform)
   return obj
 end
 
+---Apply command_wrapper to a server command string
+---@param server_cmd string The raw server command
+---@param server_name string The server name (for function-style wrappers)
+---@param wrapper? string|fun(cmd: string, name: string): string
+---@return string
+local function apply_command_wrapper(server_cmd, server_name, wrapper)
+  if not wrapper then
+    return server_cmd
+  end
+  if type(wrapper) == "function" then
+    return wrapper(server_cmd, server_name)
+  end
+  if type(wrapper) == "string" then
+    return wrapper:gsub("{}", vim.fn.shellescape(server_cmd))
+  end
+  return server_cmd
+end
+
 ---Create a transport factory for vim.lsp.start({ cmd = ... })
 ---Wraps RPC to rewrite URIs on all messages in both directions.
 ---@param ssh_cmd string[] The SSH command to run the remote LSP server
@@ -125,7 +143,7 @@ local function create_transport(ssh_cmd, server_name)
 end
 
 ---Start a remote LSP server
----@param opts { server_cmd: string, name: string, filetypes?: string[], settings?: table, init_options?: table }
+---@param opts { server_cmd: string, name: string, filetypes?: string[], settings?: table, init_options?: table, command_wrapper?: string|function }
 ---@param bufnr? number Buffer to attach to (defaults to current buffer)
 function M.start(opts, bufnr)
   local project = require("nvim-client-render.project")
@@ -143,8 +161,12 @@ function M.start(opts, bufnr)
 
   local dest = ssh.ssh_dest(parsed)
 
+  -- Apply command wrapper (per-server override > global config > none)
+  local wrapper = opts.command_wrapper or config.values.lsp.command_wrapper
+  local effective_cmd = apply_command_wrapper(opts.server_cmd, opts.name, wrapper)
+
   -- Build SSH command
-  local remote_cmd = "cd " .. active.remote_path .. " && exec " .. opts.server_cmd
+  local remote_cmd = "cd " .. active.remote_path .. " && exec " .. effective_cmd
   local cmd = { "ssh" }
   vim.list_extend(cmd, ssh_args)
   table.insert(cmd, dest)
@@ -191,6 +213,7 @@ function M.start(opts, bufnr)
         filetypes = opts.filetypes,
         settings = opts.settings,
         init_options = opts.init_options,
+        command_wrapper = opts.command_wrapper,
       },
     }
     vim.notify("[nvim-client-render] LSP started: " .. client_name .. " (id: " .. client_id .. ")", vim.log.levels.INFO)
@@ -386,6 +409,7 @@ function M.notify_file_changed(remote_path)
 end
 
 -- Expose internals for testing
+M._apply_command_wrapper = apply_command_wrapper
 M._deep_rewrite_uris = deep_rewrite_uris
 M._local_uri_to_remote = local_uri_to_remote
 M._remote_uri_to_local = remote_uri_to_local

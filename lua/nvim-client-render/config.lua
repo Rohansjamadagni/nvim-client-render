@@ -35,6 +35,7 @@ M.defaults = {
     enabled = true,
     auto_start = true,
     servers = {},
+    command_wrapper = nil, -- string|function(cmd, name): wraps LSP cmd before SSH
   },
   git = {
     enabled = true,

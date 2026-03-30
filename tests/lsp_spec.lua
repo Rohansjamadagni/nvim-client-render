@@ -186,6 +186,41 @@ describe("nvim-client-render.lsp", function()
     end)
   end)
 
+  describe("apply_command_wrapper", function()
+    local apply = function(cmd, name, wrapper)
+      return lsp._apply_command_wrapper(cmd, name, wrapper)
+    end
+
+    it("returns command unchanged when wrapper is nil", function()
+      assert.equals("lua-language-server --stdio", apply("lua-language-server --stdio", "lua_ls", nil))
+    end)
+
+    it("applies string template with {} placeholder", function()
+      local result = apply("lua-language-server --stdio", "lua_ls", "bash -ic {}")
+      -- shellescape wraps in single quotes
+      assert.is_truthy(result:find("bash %-ic"))
+      assert.is_truthy(result:find("lua%-language%-server"))
+    end)
+
+    it("applies function wrapper with cmd and name args", function()
+      local captured_cmd, captured_name
+      local wrapper = function(cmd, name)
+        captured_cmd = cmd
+        captured_name = name
+        return "custom " .. cmd
+      end
+      local result = apply("my-lsp --stdio", "test_ls", wrapper)
+      assert.equals("custom my-lsp --stdio", result)
+      assert.equals("my-lsp --stdio", captured_cmd)
+      assert.equals("test_ls", captured_name)
+    end)
+
+    it("returns command unchanged for invalid wrapper type", function()
+      assert.equals("my-lsp", apply("my-lsp", "test", 42))
+      assert.equals("my-lsp", apply("my-lsp", "test", true))
+    end)
+  end)
+
   describe("get_status", function()
     it("returns empty table when no clients", function()
       assert.same({}, lsp.get_status())
