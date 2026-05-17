@@ -72,6 +72,10 @@ function M.open(host, remote_path, callback)
       M._sessions[norm_local_path] = project_info
       M._active = project_info
 
+      pcall(function()
+        require("nvim-client-render.registry").upsert(project_info)
+      end)
+
       -- Set up file watchers
       watcher.setup(project_info)
 

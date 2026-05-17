@@ -40,6 +40,8 @@ Remote development in Neovim — edit files on a remote server locally with two-
     "RemoteLsp",
     "RemoteGit",
     "RemoteSession",
+    "RemoteProjects",
+    "RemoteClearCache",
   },
   opts = {
     -- override any defaults here (see Configuration below)
@@ -110,6 +112,8 @@ require("nvim-client-render").setup({
 | `:RemoteLsp [start\|stop\|restart\|status] [cmd]` | Manage remote LSP servers |
 | `:RemoteGit [args]` | Run git commands on the remote host |
 | `:RemoteSession [list\|switch]` | Manage multiple remote sessions |
+| `:RemoteProjects` | Pick a previously cached project to reconnect and re-sync |
+| `:RemoteClearCache` | Delete all local cache (mirrored files, SSH sockets, registry) |
 
 ## Usage
 

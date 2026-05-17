@@ -338,6 +338,7 @@ function M.setup()
 
       local function delete_cache()
         ssh.disconnect_all(function()
+          pcall(function() require("nvim-client-render.registry").clear() end)
           vim.fn.delete(config.values.cache_dir, "rf")
           vim.notify("[nvim-client-render] Cache cleared: " .. config.values.cache_dir, vim.log.levels.INFO)
         end)
@@ -413,6 +414,53 @@ function M.setup()
     complete = function()
       return { "list", "switch" }
     end,
+  })
+
+  vim.api.nvim_create_user_command("RemoteProjects", function()
+    local registry = require("nvim-client-render.registry")
+    local entries = registry.list({ prune = true })
+
+    if #entries == 0 then
+      vim.notify("[nvim-client-render] No cached projects", vim.log.levels.INFO)
+      return
+    end
+
+    local function relative_time(ts)
+      if type(ts) ~= "number" then return "?" end
+      local delta = os.time() - ts
+      if delta < 60 then return "just now" end
+      if delta < 3600 then return string.format("%dm ago", math.floor(delta / 60)) end
+      if delta < 86400 then return string.format("%dh ago", math.floor(delta / 3600)) end
+      if delta < 86400 * 30 then return string.format("%dd ago", math.floor(delta / 86400)) end
+      return os.date("%Y-%m-%d", ts)
+    end
+
+    vim.ui.select(entries, {
+      prompt = "Resume project:",
+      format_item = function(e)
+        return string.format("%s @ %s:%s  (%s)", e.name, e.host, e.remote_path, relative_time(e.last_opened_at))
+      end,
+    }, function(choice)
+      if not choice then return end
+
+      local existing = project.get_all()[choice.local_path]
+      if existing then
+        project._active = existing
+        if config.values.project.auto_cd then
+          vim.cmd("cd " .. vim.fn.fnameescape(existing.local_path))
+        end
+        vim.notify("[nvim-client-render] Switched to: " .. existing.name, vim.log.levels.INFO)
+        return
+      end
+
+      project.open(choice.host, choice.remote_path, function(err)
+        if err then
+          vim.notify("[nvim-client-render] " .. err, vim.log.levels.ERROR)
+        end
+      end)
+    end)
+  end, {
+    desc = "Resume a previously cached remote project",
   })
 end
 
