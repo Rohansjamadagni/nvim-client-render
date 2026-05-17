@@ -12,8 +12,28 @@ local M = {}
 ---@field host_id string
 ---@field parsed SSHHost
 ---@field socket string
+---@field transport "ssh"|"et"
 
 M._connections = {}
+
+---Check if ET transport is configured
+---@return boolean
+local function use_et()
+  return config.values.transport == "et"
+end
+
+---Build ET args (without destination) from config
+---@return string[]
+local function et_base_args()
+  local args = {}
+  local et_cfg = config.values.et or {}
+  if et_cfg.args then
+    for _, a in ipairs(et_cfg.args) do
+      table.insert(args, a)
+    end
+  end
+  return args
+end
 
 ---Parse a host string like "user@host:port", "user@host", "host:port", or "host"
 ---@param host_string string
@@ -135,6 +155,7 @@ function M.connect(host_string, callback)
             host_id = hid,
             parsed = parsed,
             socket = sock,
+            transport = use_et() and "et" or "ssh",
           }
           callback(nil)
         else
@@ -210,11 +231,22 @@ function M.exec(host_string, cmd, callback)
     return
   end
 
-  local args = { "ssh" }
-  vim.list_extend(args, base_ssh_args(parsed, conn.socket))
-  table.insert(args, M.ssh_dest(parsed))
-  table.insert(args, "--")
-  table.insert(args, cmd)
+  local args
+  local dest = M.ssh_dest(parsed)
+
+  if conn.transport == "et" then
+    args = { "et" }
+    vim.list_extend(args, et_base_args())
+    table.insert(args, "-c")
+    table.insert(args, cmd)
+    table.insert(args, dest)
+  else
+    args = { "ssh" }
+    vim.list_extend(args, base_ssh_args(parsed, conn.socket))
+    table.insert(args, dest)
+    table.insert(args, "--")
+    table.insert(args, cmd)
+  end
 
   local stdout_lines = {}
   local stderr_lines = {}
@@ -260,11 +292,22 @@ function M.exec_streaming(host_string, cmd, on_line, on_exit)
     return nil
   end
 
-  local args = { "ssh" }
-  vim.list_extend(args, base_ssh_args(parsed, conn.socket))
-  table.insert(args, M.ssh_dest(parsed))
-  table.insert(args, "--")
-  table.insert(args, cmd)
+  local args
+  local dest = M.ssh_dest(parsed)
+
+  if conn.transport == "et" then
+    args = { "et" }
+    vim.list_extend(args, et_base_args())
+    table.insert(args, "-c")
+    table.insert(args, cmd)
+    table.insert(args, dest)
+  else
+    args = { "ssh" }
+    vim.list_extend(args, base_ssh_args(parsed, conn.socket))
+    table.insert(args, dest)
+    table.insert(args, "--")
+    table.insert(args, cmd)
+  end
 
   local stderr_lines = {}
   local partial = ""
@@ -327,6 +370,35 @@ function M.is_connected(host_string)
   -- Synchronous check via system()
   local result = vim.fn.system({ "ssh", "-O", "check", "-S", conn.socket, M.ssh_dest(parsed) })
   return vim.v.shell_error == 0
+end
+
+---Get a transport-aware command prefix for exec/terminal/LSP use.
+---For ET: returns { "et", <et.args...>, dest }
+---For SSH: returns { "ssh", <ssh_args...>, dest }
+---@param host_string string
+---@return string[]|nil cmd, SSHHost|nil parsed
+function M.get_exec_cmd(host_string)
+  local parsed = M.parse_host(host_string)
+  local hid = host_id(parsed)
+  local conn = M._connections[hid]
+
+  if not conn then
+    return nil, nil
+  end
+
+  local dest = M.ssh_dest(parsed)
+
+  if conn.transport == "et" then
+    local et_cmd = { "et" }
+    vim.list_extend(et_cmd, et_base_args())
+    table.insert(et_cmd, dest)
+    return et_cmd, parsed
+  else
+    local args = { "ssh" }
+    vim.list_extend(args, base_ssh_args(parsed, conn.socket))
+    table.insert(args, dest)
+    return args, parsed
+  end
 end
 
 ---Get SSH args for use by transfer.lua (for rsync -e flag)

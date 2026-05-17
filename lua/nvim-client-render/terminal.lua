@@ -39,24 +39,43 @@ function M.open(opts)
     return
   end
 
-  local ssh_args, parsed = ssh.get_ssh_args(host)
-  if not ssh_args or not parsed then
+  local exec_cmd, parsed = ssh.get_exec_cmd(host)
+  if not exec_cmd or not parsed then
     vim.notify("[nvim-client-render] Not connected to " .. host, vim.log.levels.ERROR)
     return
   end
 
   local dest = ssh.ssh_dest(parsed)
+  local transport = config.values.transport
+  local cmd
 
-  local cmd = { "ssh" }
-  vim.list_extend(cmd, ssh_args)
-  table.insert(cmd, "-t")
-  table.insert(cmd, dest)
-  table.insert(cmd, "--")
-
-  if config.values.terminal.auto_cd and active then
-    table.insert(cmd, "cd " .. vim.fn.shellescape(active.remote_path) .. " && exec $SHELL -l")
+  if transport == "et" then
+    cmd = { "et" }
+    local et_cfg = config.values.et or {}
+    if et_cfg.args then
+      for _, a in ipairs(et_cfg.args) do
+        table.insert(cmd, a)
+      end
+    end
+    if config.values.terminal.auto_cd and active then
+      table.insert(cmd, "-c")
+      table.insert(cmd, "cd " .. vim.fn.shellescape(active.remote_path) .. " && exec $SHELL -l")
+    end
+    table.insert(cmd, dest)
   else
-    table.insert(cmd, "exec $SHELL -l")
+    local ssh_args = ssh.get_ssh_args(host)
+    cmd = { "ssh" }
+    if ssh_args then
+      vim.list_extend(cmd, ssh_args)
+    end
+    table.insert(cmd, "-t")
+    table.insert(cmd, dest)
+    table.insert(cmd, "--")
+    if config.values.terminal.auto_cd and active then
+      table.insert(cmd, "cd " .. vim.fn.shellescape(active.remote_path) .. " && exec $SHELL -l")
+    else
+      table.insert(cmd, "exec $SHELL -l")
+    end
   end
 
   local split = opts.split or config.values.terminal.default_split

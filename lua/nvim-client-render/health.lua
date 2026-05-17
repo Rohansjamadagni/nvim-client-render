@@ -20,8 +20,20 @@ function M.check()
     end
   end
 
-  -- Check control socket directory
+  -- Check transport config
   local config = require("nvim-client-render.config")
+  local transport = config.values.transport or "ssh"
+  vim.health.ok("Transport: " .. transport)
+
+  if transport == "et" then
+    if vim.fn.executable("et") == 1 then
+      vim.health.ok("et (Eternal Terminal) found: " .. vim.fn.exepath("et"))
+    else
+      vim.health.error("et (Eternal Terminal) not found (required when transport = \"et\")")
+    end
+  end
+
+  -- Check control socket directory
   local control_dir = config.values.ssh and config.values.ssh.control_dir
   if control_dir then
     if vim.fn.isdirectory(control_dir) == 1 then

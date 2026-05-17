@@ -153,8 +153,8 @@ function M.start(opts, bufnr)
     return
   end
 
-  local ssh_args, parsed = ssh.get_ssh_args(active.host)
-  if not ssh_args or not parsed then
+  local exec_cmd, parsed = ssh.get_exec_cmd(active.host)
+  if not exec_cmd or not parsed then
     vim.notify("[nvim-client-render] Not connected to " .. active.host, vim.log.levels.ERROR)
     return
   end
@@ -165,13 +165,32 @@ function M.start(opts, bufnr)
   local wrapper = opts.command_wrapper or config.values.lsp.command_wrapper
   local effective_cmd = apply_command_wrapper(opts.server_cmd, opts.name, wrapper)
 
-  -- Build SSH command
+  -- Build transport command
   local remote_cmd = "cd " .. active.remote_path .. " && exec " .. effective_cmd
-  local cmd = { "ssh" }
-  vim.list_extend(cmd, ssh_args)
-  table.insert(cmd, dest)
-  table.insert(cmd, "--")
-  table.insert(cmd, remote_cmd)
+  local transport = config.values.transport
+  local cmd
+
+  if transport == "et" then
+    cmd = { "et" }
+    local et_cfg = config.values.et or {}
+    if et_cfg.args then
+      for _, a in ipairs(et_cfg.args) do
+        table.insert(cmd, a)
+      end
+    end
+    table.insert(cmd, "-c")
+    table.insert(cmd, remote_cmd)
+    table.insert(cmd, dest)
+  else
+    cmd = { "ssh" }
+    local ssh_args = ssh.get_ssh_args(active.host)
+    if ssh_args then
+      vim.list_extend(cmd, ssh_args)
+    end
+    table.insert(cmd, dest)
+    table.insert(cmd, "--")
+    table.insert(cmd, remote_cmd)
+  end
 
   local client_name = "remote-" .. opts.name
   local start_opts = bufnr and { bufnr = bufnr } or nil

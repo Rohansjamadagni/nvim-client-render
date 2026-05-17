@@ -25,6 +25,10 @@ M.defaults = {
     suppress_ttl_ms = 5000,
     conflict_strategy = "warn", -- "warn" | "local_wins" | "remote_wins"
   },
+  transport = "ssh", -- "ssh" | "et"
+  et = {
+    args = {}, -- extra ET args, e.g. { "-f", "--ssh-socket=$HOME/.ssh/arista-ssh/agent.sock" }
+  },
   terminal = {
     default_split = "vertical",
     float_width = 0.8,
