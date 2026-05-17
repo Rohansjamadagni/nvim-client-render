@@ -111,49 +111,84 @@ function M.sync_metadata(local_path, callback)
   local info = session.project_info
   local git_dir = session.git_dir
 
-  local tar_cmd = "cd " .. shell_quote(info.remote_path) .. " && {"
-    .. ' gd=$(git rev-parse --git-dir 2>/dev/null);'
-    .. ' cdir=$(git rev-parse --git-common-dir 2>/dev/null || echo "$gd");'
-    .. ' sf=""; for f in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD; do'
-    .. '   test -f "$gd/$f" && sf="$sf $f";'
-    .. ' done;'
-    .. ' pr=""; test -f "$cdir/packed-refs" && pr="packed-refs";'
-    .. ' tar cf - -C "$gd" HEAD $sf -C "$cdir" config refs/ $pr 2>/dev/null;'
-    .. " } || true"
-
-  local ssh_args, parsed = ssh.get_ssh_args(info.host)
-  if not ssh_args or not parsed then
-    vim.schedule(function() callback("Not connected") end)
+  if not ssh.is_connected(info.host) then
+    vim.schedule(function() callback("SSH connection lost to " .. info.host) end)
     return
   end
 
-  local dest = get_ssh_dest(parsed)
-  local ssh_parts = { "ssh" }
-  for _, a in ipairs(ssh_args) do
-    table.insert(ssh_parts, vim.fn.shellescape(a))
+  if not git_dir then
+    vim.schedule(function() callback("git_dir not set for session") end)
+    return
   end
-  table.insert(ssh_parts, vim.fn.shellescape(dest))
-  table.insert(ssh_parts, "--")
-  table.insert(ssh_parts, vim.fn.shellescape(tar_cmd))
 
-  local cmd = table.concat(ssh_parts, " ")
-    .. " | tar xf - -C " .. vim.fn.shellescape(git_dir) .. " 2>/dev/null; true"
+  if vim.fn.isdirectory(git_dir) == 0 then
+    vim.schedule(function() callback("git_dir does not exist: " .. git_dir) end)
+    return
+  end
 
-  vim.fn.jobstart({ "sh", "-c", cmd }, {
-    on_exit = function()
-      vim.schedule(function()
-        if vim.fn.filereadable(git_dir .. "/HEAD") == 1 then
-          local head = vim.fn.readfile(git_dir .. "/HEAD")
-          if head and #head > 0 then
-            session.prev_head = session.prev_head or head[1]
-          end
-          callback(nil)
-        else
-          callback("Failed to sync git metadata: HEAD not found")
-        end
-      end)
-    end,
-  })
+  local dump_cmd = "cd " .. shell_quote(info.remote_path) .. " && {"
+    .. ' gd=$(git rev-parse --git-dir 2>/dev/null);'
+    .. ' if [ -z "$gd" ] || [ ! -d "$gd" ]; then echo "NO_GIT_DIR" >&2; exit 1; fi;'
+    .. ' cdir=$(git rev-parse --git-common-dir 2>/dev/null || echo "$gd");'
+    .. ' if [ ! -d "$cdir" ]; then cdir="$gd"; fi;'
+    .. ' emit() { echo "@@FILE@@$1"; cat "$2" 2>/dev/null; };'
+    .. ' emit HEAD "$gd/HEAD";'
+    .. ' for f in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD; do'
+    .. '   test -f "$gd/$f" && emit "$f" "$gd/$f";'
+    .. ' done;'
+    .. ' test -f "$cdir/config" && emit config "$cdir/config";'
+    .. ' test -f "$cdir/packed-refs" && emit packed-refs "$cdir/packed-refs";'
+    .. ' find "$cdir/refs" -type f 2>/dev/null | while IFS= read -r rf; do'
+    .. '   rel="${rf#$cdir/}"; emit "$rel" "$rf";'
+    .. ' done;'
+    .. " }"
+
+  ssh.exec(info.host, dump_cmd, function(code, stdout, stderr)
+    if code ~= 0 then
+      local detail = table.concat(stderr, "; ")
+      if detail == "" then detail = "exit code " .. code end
+      callback("Remote git metadata fetch failed: " .. detail)
+      return
+    end
+
+    if #stdout == 0 then
+      callback("Remote returned empty git metadata")
+      return
+    end
+
+    -- Parse @@FILE@@<path> delimited output and write files locally
+    local current_path = nil
+    local current_lines = {}
+
+    local function flush()
+      if not current_path then return end
+      local dest_path = git_dir .. "/" .. current_path
+      vim.fn.mkdir(vim.fn.fnamemodify(dest_path, ":h"), "p")
+      vim.fn.writefile(current_lines, dest_path)
+    end
+
+    for _, line in ipairs(stdout) do
+      local file_path = line:match("^@@FILE@@(.+)$")
+      if file_path then
+        flush()
+        current_path = file_path
+        current_lines = {}
+      elseif current_path then
+        table.insert(current_lines, line)
+      end
+    end
+    flush()
+
+    if vim.fn.filereadable(git_dir .. "/HEAD") == 1 then
+      local head = vim.fn.readfile(git_dir .. "/HEAD")
+      if head and #head > 0 then
+        session.prev_head = session.prev_head or head[1]
+      end
+      callback(nil)
+    else
+      callback("Remote git metadata had no HEAD file")
+    end
+  end)
 end
 
 ---Get manifest file path for a session
