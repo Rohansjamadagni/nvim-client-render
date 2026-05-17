@@ -284,6 +284,10 @@ local function make_on_exit(w, key)
           end
           M.start(w.project_info)
           M._catch_up_sync(w.project_info)
+          -- LSP RPCs ride on the same SSH session, so they died when the
+          -- watcher did. Bounce them now that the socket is healthy again.
+          local ok, lsp_mod = pcall(require, "nvim-client-render.lsp")
+          if ok then lsp_mod.restart() end
         end)
       end)
     end)

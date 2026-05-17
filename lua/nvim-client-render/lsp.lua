@@ -9,6 +9,11 @@ M._clients = {}
 ---@type table<string, table> server_name -> { server_cmd, name, filetypes, settings, init_options }
 M._discovered_configs = {}
 
+---Configs of clients that died (e.g. SSH dropped). Kept so restart() can
+---resurrect them after `get_status` pruned the dead entry from `_clients`.
+---@type table<string, table> server_name -> server_config
+M._stopped_configs = {}
+
 ---Convert a local file URI to a remote file URI
 ---@param uri string
 ---@return string
@@ -361,19 +366,31 @@ function M.stop_all()
     end
   end
   M._clients = {}
+  M._stopped_configs = {}
 end
 
----Restart all remote LSP clients
+---Restart all remote LSP clients (including any that died since last status)
 function M.restart()
   local to_restart = {}
+  local seen = {}
   for client_id, info in pairs(M._clients) do
+    if info.server_config and not seen[info.server_config.name] then
+      table.insert(to_restart, info.server_config)
+      seen[info.server_config.name] = true
+    end
     local client = vim.lsp.get_client_by_id(client_id)
     if client then
-      table.insert(to_restart, info.server_config)
       client.stop()
     end
   end
+  for name, sc in pairs(M._stopped_configs) do
+    if not seen[name] then
+      table.insert(to_restart, sc)
+      seen[name] = true
+    end
+  end
   M._clients = {}
+  M._stopped_configs = {}
 
   local timer = vim.uv.new_timer()
   timer:start(500, 0, function()
@@ -386,7 +403,9 @@ function M.restart()
   end)
 end
 
----Get status of all remote LSP clients (cleans up stale entries)
+---Get status of all remote LSP clients. Stale entries are pruned, but their
+---server_config is stashed in `_stopped_configs` so a later restart() can
+---resurrect them.
 ---@return table[]
 function M.get_status()
   local result = {}
@@ -401,6 +420,9 @@ function M.get_status()
         active = true,
       })
     else
+      if info.server_config then
+        M._stopped_configs[info.server_config.name] = info.server_config
+      end
       M._clients[client_id] = nil
     end
   end
