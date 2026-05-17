@@ -60,7 +60,8 @@ function M.setup()
     end
 
     local status = sync.get_status()
-    local connected = ssh.is_connected(active.host)
+    local ok_conn, connected = pcall(ssh.is_connected, active.host)
+    if not ok_conn then connected = false end
 
     local lines = {
       "Project: " .. active.name,
@@ -84,7 +85,7 @@ function M.setup()
 
     local remote_watcher = require("nvim-client-render.remote_watcher")
     table.insert(lines, "")
-    table.insert(lines, "Remote Watcher: " .. (remote_watcher.is_running(active.local_path) and "running" or "stopped"))
+    table.insert(lines, "Remote Watcher: " .. remote_watcher.get_state(active.local_path))
 
     local lsp_mod = require("nvim-client-render.lsp")
     local lsp_clients = lsp_mod.get_status()
@@ -223,10 +224,13 @@ function M.setup()
       return
     end
 
-    if remote_watcher.is_running(active.local_path) then
+    local state = remote_watcher.get_state(active.local_path)
+    if state == "running" or state == "reconnecting" then
       remote_watcher.stop(active.local_path)
       vim.notify("[nvim-client-render] Remote watcher stopped", vim.log.levels.INFO)
     else
+      -- stopped, failed, or never started: restart fresh
+      remote_watcher.stop(active.local_path)
       remote_watcher.start(active)
       vim.notify("[nvim-client-render] Remote watcher started", vim.log.levels.INFO)
     end

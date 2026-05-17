@@ -13,6 +13,8 @@ local M = {}
 ---@field event_count number
 ---@field event_window_start number
 ---@field gc_timer userdata|nil
+---@field healthy_timer userdata|nil
+---@field state "running"|"reconnecting"|"stopped"|"failed"
 
 ---@type table<string, WatcherState>
 M._watchers = {}
@@ -213,12 +215,26 @@ local function make_on_line(w)
   end
 end
 
+---Run a single full rsync after a successful reattach. rsync is already
+---incremental over the wire so this just copies down whatever drifted.
+---@param project_info ProjectInfo
+function M._catch_up_sync(project_info)
+  transfer.sync_folder(project_info.host, project_info.remote_path, project_info.local_path,
+    function(err)
+      if err then
+        vim.notify("[nvim-client-render] Catch-up sync failed: " .. err, vim.log.levels.WARN)
+        return
+      end
+      vim.cmd("checktime")
+    end)
+end
+
 ---Create on_exit handler for a specific watcher
 ---@param w WatcherState
 ---@param key string
 ---@return fun(code: number, stderr: string[])
 local function make_on_exit(w, key)
-  return function(code, stderr)
+  local function on_exit(code, stderr)
     w.job_id = nil
 
     -- Normal shutdown (we stopped it)
@@ -226,20 +242,31 @@ local function make_on_exit(w, key)
       return
     end
 
-    local max_attempts = 5
-    if w.reconnect_attempts >= max_attempts then
+    if w.healthy_timer then
+      w.healthy_timer:stop()
+      w.healthy_timer:close()
+      w.healthy_timer = nil
+    end
+
+    w.state = "reconnecting"
+    local cfg = config.values.remote_watcher
+    w.reconnect_attempts = w.reconnect_attempts + 1
+
+    if w.reconnect_attempts > cfg.reconnect_max_attempts then
+      w.state = "failed"
       vim.notify(
-        "[nvim-client-render] Remote watcher failed after " .. max_attempts .. " reconnect attempts",
+        "[nvim-client-render] Remote watcher gave up after "
+          .. cfg.reconnect_max_attempts .. " attempts; run :RemoteWatch to retry",
         vim.log.levels.ERROR
       )
       return
     end
 
-    w.reconnect_attempts = w.reconnect_attempts + 1
-    local delay = math.min(2000 * (2 ^ (w.reconnect_attempts - 1)), 30000)
+    local delay = math.min(2000 * (2 ^ (w.reconnect_attempts - 1)), cfg.reconnect_max_delay_ms)
 
     vim.notify(
-      "[nvim-client-render] Remote watcher disconnected, reconnecting in " .. (delay / 1000) .. "s... (attempt " .. w.reconnect_attempts .. "/" .. max_attempts .. ")",
+      "[nvim-client-render] Remote watcher disconnected, reconnecting in "
+        .. (delay / 1000) .. "s... (attempt " .. w.reconnect_attempts .. ")",
       vim.log.levels.WARN
     )
 
@@ -247,12 +274,21 @@ local function make_on_exit(w, key)
     reconnect_timer:start(delay, 0, function()
       reconnect_timer:close()
       vim.schedule(function()
-        if M._watchers[key] then
+        if not M._watchers[key] then return end
+        ssh.ensure_connected(w.project_info.host, function(ssh_err)
+          if not M._watchers[key] then return end
+          if ssh_err then
+            -- SSH itself failed; bounce through on_exit again to back off further
+            on_exit(1, { ssh_err })
+            return
+          end
           M.start(w.project_info)
-        end
+          M._catch_up_sync(w.project_info)
+        end)
       end)
     end)
   end
+  return on_exit
 end
 
 ---Start watching remote filesystem for changes
@@ -264,9 +300,12 @@ function M.start(project_info)
 
   local key = project_info.local_path
 
-  -- Stop existing watcher for this session if any
-  if M._watchers[key] then
-    M.stop(key)
+  -- Preserve reconnect_attempts across restart-from-reconnect so backoff
+  -- keeps escalating; only fresh callers (M.stop has cleared state) get 0.
+  local prev = M._watchers[key]
+  local prev_attempts = prev and prev.reconnect_attempts or 0
+  if prev then
+    M._stop_watcher(prev)
   end
 
   local w = {
@@ -274,10 +313,12 @@ function M.start(project_info)
     project_info = project_info,
     suppressed = {},
     download_timers = {},
-    reconnect_attempts = 0,
+    reconnect_attempts = prev_attempts,
     event_count = 0,
     event_window_start = 0,
     gc_timer = nil,
+    healthy_timer = nil,
+    state = "stopped",
   }
   M._watchers[key] = w
 
@@ -287,6 +328,24 @@ function M.start(project_info)
   w.job_id = ssh.exec_streaming(project_info.host, cmd, make_on_line(w), make_on_exit(w, key))
 
   if w.job_id then
+    w.state = "running"
+
+    -- A watcher that survives 30s is considered healthy; reset attempts so
+    -- the next crash starts at the bottom of the backoff curve.
+    w.healthy_timer = vim.uv.new_timer()
+    w.healthy_timer:start(30000, 0, function()
+      vim.schedule(function()
+        local current = M._watchers[key]
+        if current == w and w.job_id then
+          w.reconnect_attempts = 0
+        end
+        if w.healthy_timer then
+          w.healthy_timer:close()
+          w.healthy_timer = nil
+        end
+      end)
+    end)
+
     local ttl = config.values.remote_watcher.suppress_ttl_ms
     w.gc_timer = vim.uv.new_timer()
     w.gc_timer:start(ttl, ttl, function()
@@ -308,11 +367,13 @@ function M.stop(local_path)
   if local_path then
     local w = M._watchers[local_path]
     if w then
+      w.state = "stopped"
       M._stop_watcher(w)
       M._watchers[local_path] = nil
     end
   else
-    for key, w in pairs(M._watchers) do
+    for _, w in pairs(M._watchers) do
+      w.state = "stopped"
       M._stop_watcher(w)
     end
     M._watchers = {}
@@ -331,6 +392,12 @@ function M._stop_watcher(w)
     w.gc_timer:stop()
     w.gc_timer:close()
     w.gc_timer = nil
+  end
+
+  if w.healthy_timer then
+    w.healthy_timer:stop()
+    w.healthy_timer:close()
+    w.healthy_timer = nil
   end
 
   for _, timer in pairs(w.download_timers) do
@@ -357,6 +424,15 @@ function M.is_running(local_path)
     end
   end
   return false
+end
+
+---Get the current state of a watcher
+---@param local_path string  session key
+---@return "running"|"reconnecting"|"stopped"|"failed"
+function M.get_state(local_path)
+  local w = M._watchers[local_path]
+  if not w then return "stopped" end
+  return w.state or "stopped"
 end
 
 return M

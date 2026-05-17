@@ -24,6 +24,8 @@ M.defaults = {
     debounce_ms = 500,
     suppress_ttl_ms = 5000,
     conflict_strategy = "warn", -- "warn" | "local_wins" | "remote_wins"
+    reconnect_max_delay_ms = 30000,
+    reconnect_max_attempts = 200,
   },
   transport = "ssh", -- "ssh" | "et"
   et = {

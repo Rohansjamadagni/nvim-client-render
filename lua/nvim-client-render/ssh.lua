@@ -166,6 +166,21 @@ function M.connect(host_string, callback)
   })
 end
 
+---Ensure a live ControlMaster for `host_string`. Probes via `ssh -O check`
+---and, if dead/missing, drops the cached entry and runs `connect` fresh.
+---@param host_string string
+---@param callback fun(err: string|nil)
+function M.ensure_connected(host_string, callback)
+  local parsed = M.parse_host(host_string)
+  local hid = host_id(parsed)
+  if M._connections[hid] and M.is_connected(host_string) then
+    vim.schedule(function() callback(nil) end)
+    return
+  end
+  M._connections[hid] = nil
+  M.connect(host_string, callback)
+end
+
 ---Disconnect from a host
 ---@param host_string string
 ---@param callback fun(err: string|nil)
